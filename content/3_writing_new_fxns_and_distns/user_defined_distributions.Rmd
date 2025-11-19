@@ -1,0 +1,524 @@
+---
+title: "Extending NIMBLE: Writing new functions and distributions to use in models"
+subtitle: "NIMBLE workshop, CEFE/CNRS, Montpellier, France"
+author: "NIMBLE Development Team"
+date: "November 2025"
+output:
+  slidy_presentation: default
+  beamer_presentation: default
+---
+
+<style>
+slides > slide {
+  overflow-x: auto !important;
+  overflow-y: auto !important;
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE)
+library(nimble)
+#library(compareMCMCs)
+recalculate <- TRUE
+```
+
+# Why extend models?
+
+* A model in nimble is a set of ordered calculations with cached (stored) results.
+* Algorithms use a model as a machine: 
+
+    * get and set values
+    * manage calculations and simulations
+    
+* As in lots of coding, different designs can have very different efficiencies.
+* WinBUGS/OpenBUGS/JAGS have closed designs.
+* NIMBLE opens up the model language by making it extensible using `nimbleFunction`s.
+
+# Custom (user-defined) distributions: marginalize
+
+* For an occupancy model, we can calculate the marginal probability of a detection history easily.
+* An occupancy model defines a distribution of capture-histories.
+* Say we want to use an occupancy distribution directly in a model 
+* This is provided in `nimbleEcology` and used here to introduce extending models.
+* We want model code like this:
+
+```{r, eval=FALSE}
+nimbleCode({
+  # ...model code snippet...
+  for (i in 1:M)
+    y[i, 1:J] ~ dOcc_v(probOcc = psi[i], probDetect = p[i, 1:J], len = J)
+  # ...  
+```
+
+* The distribution is for a detection history (vector) `y[i, 1:J]`.
+* An argument is the detection probability vector `p[i, 1:J]`.
+* There will be no latent occupancy states (`z[i]`).
+
+Set up occupancy example again
+=====
+
+```{r}
+Section10p4_code <- nimbleCode({
+  # Priors
+  mean.p ~ dunif(0, 1)         # Detection intercept on prob. scale
+  alpha0 <- logit(mean.p)      # Detection intercept
+  alpha1 ~ dunif(-20, 20)      # Detection slope on wind
+  mean.psi ~ dunif(0, 1)       # Occupancy intercept on prob. scale
+  beta0 <- logit(mean.psi)     # Occupancy intercept
+  beta1 ~ dunif(-20, 20)       # Occupancy slope on vegHt
+  
+  # Likelihood
+  for (i in 1:M) {
+    # True state model for the partially observed true state
+    z[i] ~ dbern(psi[i])      # True occupancy z at site i
+    logit(psi[i]) <- beta0 + beta1 * vegHt[i]
+    for (j in 1:J) {
+      # Observation model for the actual observations
+      y[i,j] ~ dbern(p.eff[i,j])    # Detection-nondetection at i and j
+      p.eff[i,j] <- z[i] * p[i,j]   # 'straw man' for WinBUGS
+      logit(p[i,j]) <- alpha0 + alpha1 * wind[i,j]
+    }
+  }
+  # Derived quantities are removed.
+}
+)
+
+if(!exists("DO_PLOT"))
+  DO_PLOT <- FALSE
+# Choose sample sizes and prepare obs. data array y
+set.seed(1)                   # So we all get same data set
+M <- 100                      # Number of sites
+J <- 3                        # Number of presence/absence measurements
+y <- matrix(NA, nrow = M, ncol = J) # to contain the obs. data
+
+# Create a covariate called vegHt
+vegHt <- sort(runif(M, -1, 1)) # sort for graphical convenience
+
+# Choose parameter values for occupancy model and compute occupancy
+beta0 <- 0                    # Logit-scale intercept
+beta1 <- 3                    # Logit-scale slope for vegHt
+psi <- plogis(beta0 + beta1 * vegHt) # Occupancy probability
+# plot(vegHt, psi, ylim = c(0,1), type = "l", lwd = 3) # Plot psi relationship
+
+# Now visit each site and observe presence/absence perfectly
+z <- rbinom(M, 1, psi)        # True presence/absence
+
+# Look at data so far
+table(z)
+
+# Plot the true system state
+if(DO_PLOT) {
+  par(mfrow = c(1, 3), mar = c(5,5,2,2), cex.axis = 1.5, cex.lab = 1.5)
+  plot(vegHt, z, xlab="Vegetation height", ylab="True presence/absence (z)", frame = F, cex = 1.5)
+  plot(function(x) plogis(beta0 + beta1*x), -1, 1, add=T, lwd=3, col = "red")
+}
+
+# Create a covariate called wind
+wind <- array(runif(M * J, -1, 1), dim = c(M, J))
+
+# Choose parameter values for measurement error model and compute detectability
+alpha0 <- -2                        # Logit-scale intercept
+alpha1 <- -3                        # Logit-scale slope for wind
+p <- plogis(alpha0 + alpha1 * wind) # Detection probability
+# plot(p ~ wind, ylim = c(0,1))     # Look at relationship
+
+# Take J = 3 presence/absence measurements at each site
+for(j in 1:J) {
+  y[,j] <- rbinom(M, z, p[,j])
+}
+sum(apply(y, 1, max))               # Number of sites with observed presences
+
+# Plot observed data and true effect of wind on detection probability
+if(DO_PLOT) {
+  plot(wind, y, xlab="Wind", ylab="Observed det./nondetection data (y)", frame = F, cex = 1.5)
+  plot(function(x) plogis(alpha0 + alpha1*x), -1, 1, add=T, lwd=3, col = "red")
+}
+# Look at the data: occupancy, true presence/absence (z), and measurements (y)
+cbind(psi=round(psi,2), z=z, y1=y[,1], y2=y[,2], y3=y[,3])
+
+# Create factors
+time <- matrix(rep(as.character(1:J), M), ncol = J, byrow = TRUE)
+hab <- c(rep("A", 33), rep("B", 33), rep("C", 34))  # Must have M = 100
+
+# Bundle and summarize data set
+str( occupancy_data <- list(y = y, 
+                            vegHt = vegHt,
+                            wind = wind,
+                            M = nrow(y),
+                            J = ncol(y)))
+
+# Initial values: must give for same quantities as priors given !
+zst <- apply(y, 1, max)        # Avoid data/model/inits conflict
+occupancy_inits <- function(){
+  list(z = zst, 
+       mean.p = runif(1), 
+       alpha1 = runif(1), 
+       mean.psi = runif(1), 
+       beta1 = runif(1))
+}
+```
+
+# Steps we will take
+
+* Write dOcc (`dOcc_R`) as an R function: get our math and logic right.
+* Test/debug `dOcc_R`.
+* Convert `dOcc_R` to a `nimbleFunction` (`dOcc`).
+* Test/debug *uncompiled* `dOcc` **outside of a model** (in R).
+* Test/debug *uncompiled* `dOcc` in an **uncompiled nimble model** (in R).
+* Test/debug *uncompiled* `dOcc` in an **uncompiled nimble MCMC** (in R).
+* *Compile* and test `dOcc` **outside of a model** (in C++).
+* *Compile* and test `dOcc` in a **compiled model** (in C++).
+* *Compile* and test `dOcc` in a **compiled MCMC** (in C++).
+
+How we can write `dOcc` in R
+=====
+
+Prob(Detection history) = Prob(Detection history | Occupied) Prob(Occupied) + Prob(Detection history | Unoccupied) Prob(Unoccupied)
+
+Hybrid math / code expression:
+\[
+P(y[i,1\colon J] ~|~ \psi, p[i, 1\colon J]) = \psi \prod_{j=1}^J \mbox{dbern}(y[i,j] ~|~ p[i,j]) + (1-\psi) I(\mbox{all } y[i, j] \mbox{ = 0})
+\]
+
+```{r}
+dOcc_R <- function(x, probOcc, probDetect, len, log=FALSE) {
+  if (length(x) != length(probDetect))
+    stop("Length of data does not match length of detection vector.")
+  logProb_x_given_occupied <- sum(dbinom(x,
+                                         prob = probDetect, 
+                                         size = 1,
+                                         log = TRUE))
+  prob_x_given_unoccupied <- sum(x) == 0
+  prob_x <- exp(logProb_x_given_occupied) * probOcc + 
+    prob_x_given_unoccupied * (1 - probOcc)
+  if (log)
+    return(log(prob_x))
+  return(prob_x)
+}
+```
+
+* `len` (length) argument is superfluous and will be explained later.
+
+# Test `dOcc_R` in R
+
+```{r}
+y[9,] # A good example detection history
+dOcc_R(y[9,], probOcc = 0.7, probDetect = c(0.5, 0.4, 0.3), log = TRUE)
+# check the answer manually
+log(0.7 * prod(dbinom(y[9,], prob = c(0.5, 0.4, 0.3), size = 1)))
+```
+
+# Convert `dOcc_R` to `nimbleFunction`
+
+`nimbleFunction`:
+
+- Can be used in a model or algorithm
+- Can use models (e.g. an MCMC sampler) if it has "`setup`" code (not covered).
+- Can be compiled.
+- "compiled" means that nimble will generate C++, compile that, and make it available for use from R.
+- Supports much of R's math, distributions, and basic flow control.
+- Does not support objects or functions of any type complexity (lists, environments, lapply)
+- Requires type annotation for inputs and outputs
+
+```{r}
+dOcc <- nimbleFunction(
+  run = function(x = double(1), # argument type declarations
+                 probOcc = double(0),
+                 probDetect = double(1),
+                 len = integer(0, default = 0),
+                 log = logical(0, default = 0)) {
+    if (len != 0) 
+      if (len != length(x))
+        stop("Argument 'len' must match length of data, or be 0.")
+    if (length(x) != length(probDetect))
+      stop("Length of data does not match length of detection vector.")
+    returnType(double(0)) # return type declaration (can be anywhere)
+    logProb_x_given_occupied <- sum(dbinom(x,
+                                           prob = probDetect, 
+                                           size = 1,
+                                           log = TRUE))
+    prob_x_given_unoccupied <- sum(x) == 0
+    prob_x <- exp(logProb_x_given_occupied) * probOcc + 
+      prob_x_given_unoccupied * (1 - probOcc)
+    if (log)
+      return(log(prob_x))
+    return(prob_x)
+  }
+)
+```
+
+Key points about `nimbleFunctions`:
+
+- defined by providing an R function as an argument.
+- special syntax for argument types and return type.
+- supports much of R's math, distributions, and basic flow control (if-then-else, for loops).
+- can be used in a model or algorithm
+- can be compiled: nimble can generate C++, compile that, and make it available for use from R.
+- does not support objects or functions of any type complexity (lists, environments, lapply)
+
+Later: 
+- Can use models (e.g. an MCMC sampler) if it has "`setup`" code (not covered now).
+
+# Test the uncompiled `dOcc` via R debugging tools
+
+```{r}
+dOcc(y[9,], probOcc = 0.7, probDetect = c(0.5, 0.4, 0.3), log = TRUE)
+```
+
+### We can debug it as needed in R.
+```{r, eval=FALSE}
+debugonce(dOcc)
+dOcc(y[9,], probOcc = 0.7, probDetect = c(0.5, 0.4, 0.3), log = TRUE)
+```
+
+* Can use `browser()` in function code.
+* `debug` and `debugonce`.
+
+# (Avoid knitr problem)
+
+Due to an issue with the way `knitr` processes Rmd into these slides, we will redefine `dOcc`.
+
+```{r}
+dOcc <- nimbleFunction(
+  run = function(x = double(1), # argument type declarations
+                 probOcc = double(0),
+                 probDetect = double(1),
+                 len = integer(0, default = 0),
+                 log = logical(0, default = 0)) {
+    if (len != 0) 
+      if (len != length(x))
+        stop("Argument 'len' must match length of data, or be 0.")
+    if (length(x) != length(probDetect))
+      stop("Length of data does not match length of detection vector.")
+    returnType(double(0)) # return type declaration (can be anywhere)
+    logProb_x_given_occupied <- sum(dbinom(x,
+                                           prob = probDetect, 
+                                           size = 1,
+                                           log = TRUE))
+    prob_x_given_unoccupied <- sum(x) == 0
+    prob_x <- exp(logProb_x_given_occupied) * probOcc + 
+      prob_x_given_unoccupied * (1 - probOcc)
+    if (log)
+      return(log(prob_x))
+    return(prob_x)
+  }
+)
+```
+
+
+# Use the uncompiled `dOcc` in an uncompiled model.
+
+```{r}
+occCode2 <- nimbleCode({
+  # Priors
+  mean.p ~ dunif(0, 1)         # Detection intercept on prob. scale
+  alpha0 <- logit(mean.p)      # Detection intercept
+  alpha1 ~ dunif(-20, 20)      # Detection slope on wind
+  mean.psi ~ dunif(0, 1)       # Occupancy intercept on prob. scale
+  beta0 <- logit(mean.psi)     # Occupancy intercept
+  beta1 ~ dunif(-20, 20)       # Occupancy slope on vegHt
+  
+  # Likelihood
+  for (i in 1:M) {
+    # True state model for the partially observed true state
+    logit(psi[i]) <- beta0 + beta1 * vegHt[i]
+    y[i, 1:J] ~ dOcc(probOcc = psi[i], probDetect = p[i, 1:J], len = J)
+    for (j in 1:J) {
+      logit(p[i,j]) <- alpha0 + alpha1 * wind[i,j]
+    }
+  }
+})
+```
+
+```{r}
+occModel2 <- nimbleModel(occCode2,
+                         constants = occupancy_data,
+                         inits = occupancy_inits())
+```
+
+# Test the uncompiled `dOcc` in an uncompiled model.
+
+```{r}
+occModel2$calculate()
+occModel2$calculate("y[9,]")
+occModel2$psi[1:10]
+occModel2$p[9,]
+occModel2$psi[9] <- 0.7
+occModel2$p[9,] <- c(.5,.4,.3)
+occModel2$calculate("y[9,]") # same as above
+```
+
+# Debug the uncompiled `dOcc` when called from a model.
+
+```{r, eval=FALSE}
+debug(dOcc)
+occModel2$calculate("y[9,]")
+undebug(dOcc)
+```
+
+# Test the uncompiled `dOcc` in an uncompiled MCMC.
+
+```{r}
+occMCMC2 <- buildMCMC(occModel2)
+occMCMC2$run(niter=5) # could use runMCMC(occMCMC2, niter=5, nchains=1)
+as.matrix(occMCMC2$mvSamples)
+```
+
+We could do `debug(dOcc)` or insert `browser()` call(s) into dOcc.
+
+# Test compiled `dOcc` on its own
+
+```{r, eval=recalculate}
+C_dOcc <- compileNimble(dOcc)
+```
+
+```{r}
+C_dOcc(y[9,], probOcc = 0.7, probDetect = c(0.5, 0.4, 0.3), log = TRUE)
+```
+
+We can't use `debug` or `browser()` for compiled versions!
+
+# Test compiled `dOcc` in a compiled model
+
+```{r comp_occModel2, eval=recalculate}
+C_occModel2 <- compileNimble(occModel2)
+```
+
+```{r, eval=recalculate}
+C_occModel2$calculate()
+C_occModel2$calculate('y[9,]')
+C_occModel2$psi[9]
+C_occModel2$p[9,]
+C_occModel2$psi[9] <- 0.7
+C_occModel2$p[9,] <- c(.5,.4,.3)
+C_occModel2$calculate('y[9,]')
+```
+
+# Test compiled `dOcc` in a compiled MCMC
+
+```{r comp_occMCMC2, eval=recalculate}
+C_occMCMC2 <- compileNimble(occMCMC2, project = occModel2)
+```
+
+```{r, eval=recalculate}
+#C_occMCMC2$run(niter = 5) # could use runMCMC
+#as.matrix(C_occMCMC2$mvSamples)
+```
+
+
+# The full-blown versions of `dOcc`
+
+* `nimbleEcology` provides different versions (`dOcc_v`, `dOcc_s`) for time-varying vs time-constant survival and capture probabilities,.
+* Inclusion of a `len` (length) parameter is needed in some cases and so is included in all cases.
+* `nimbleEcology` provides marginalized versions of dynamic occupancy, capture-recapture (CJS), N-mixture, and hidden Markov models (HMMs).
+
+# Some other ways to customize models:
+
+* Vectorize declarations.
+* Move calculations into or out of the model.
+* Reorganize large data structures [Algorithms + Data Structures = Programs](https://en.wikipedia.org/wiki/Algorithms_%2B_Data_Structures_%3D_Programs)
+* Call arbitrary R functions.
+* Call externally coded C/C++/other functions.
+    
+# Vectorize declarations
+
+* Example: distance calculations in a spatial capture-recapture model
+
+Instead of
+
+```{r}
+dist_code <- nimbleCode({
+  for(i in 1:num_animals) {
+    for(j in 1:num_detectors) {
+      dist2[i, j] <- (sxy[i,1] - detector_xy[j,1])^2 + (sxy[i,2] - detector_xy[j,2])^2
+    } # sxy are individual activity centers. detector_xy and detector locations.
+  }
+})
+```
+
+try
+```{r, eval=recalculate}
+dist_code_vec <- nimbleCode({
+  for(i in 1:num_animals) {
+    dist2[i, 1:num_detectors] <- (sxy[i,1] - detector_xy[1:num_detectors,1])^2 + (sxy[i,2] - detector_xy[1:num_detectors,2])^2
+  }
+})
+```
+
+```{r, eval=recalculate}
+dist_model <- nimbleModel(dist_code_vec, constants = list(num_animals = 2, num_detectors = 3 ))
+dist_model$detector_xy <- matrix(rnorm(6), nrow = 3)
+dist_model$sxy <- matrix(rnorm(4), nrow = 2)
+dist_model$calculate()
+dist_model$dist2
+```
+
+Alternative approach: Use a new `nimbleFunction`
+
+```{r, eval=recalculate}
+calcDistances <- nimbleFunction(
+  run = function(sxy = double(1), det_xy = double(2)) {
+    returnType(double(1))
+    ans <- (sxy[1] - det_xy[,1])^2 +
+      (sxy[2] - det_xy[,2])^2
+    return(ans)
+  })
+
+dist_model_alt <- nimbleModel(
+  nimbleCode({
+    for(i in 1:num_animals) {
+      dist2[i, 1:num_detectors] <- calcDistances(sxy[i, 1:2], detector_xy[1:num_detectors, 1:2]) #  You  write calcDistances as a nimbleFunction
+    }}),
+  constants = list(num_animals = 2, num_detectors = 3)
+)
+dist_model_alt$detector_xy <- dist_model$detector_xy
+dist_model_alt$sxy <- dist_model$sxy
+dist_model_alt$calculate()
+dist_model_alt$dist2
+```
+
+### Careful: Vectorize calculations only when they will always be calculated together during MCMC anyway.  Calculations that stem from the same stochastic node(s) being updated by an MCMC sampler will always be calculated together.  Do not vectorize nodes that stem from different stochastic nodes (unless those are block-sampled).
+
+# Move calculations into or out of model
+
+* The model caches calculations and re-computes them only when necessary.
+* Very large numbers of nodes in the model can slow down model building, compilation, and execution.
+* Vectorizing results in one vector node in place of multiple scalar nodes.
+* Multiple intermediate steps that are fast to compute can be moved out of a model into a `nimbleFunction`, reducing the size of the model.
+* Costly calculations can be kept in the model to benefit from caching.
+
+# Call back to R
+
+* Say you have a function or distribution that is too complicated for a `nimbleFunction`.
+
+Adding two to a vector is very complicated.
+```{r, eval=recalculate}
+add2 <- function(x) {
+  message("Hello from add2")
+  x + 2 # A very complicated calculation
+}
+```
+
+Make a `nimbleFunction` to wrap access to an R function, with type annotations.
+```{r, eval=recalculate}
+Radd2 <- nimbleRcall(
+  function(x = double(1)){}, # Empty function to give type annotations
+  Rfun = 'add2',             # name of R function
+  returnType = double(1))    # return type
+```
+
+Use in a model
+```{r, eval=recalculate}
+demoCode <- nimbleCode({
+    for(i in 1:4) {x[i] ~ dnorm(0,1)} 
+    z[1:4] <- Radd2(x[1:4])
+})
+demoModel <- nimbleModel(demoCode, inits = list(x = rnorm(4)))
+CdemoModel <- compileNimble(demoModel)
+CdemoModel$calculate()
+```
+
+### Control for the `nimbleRcall` will be passed to the R evaluator, which will be slower than compiled C++.
+
+### See `nimbleExternalCall` to call externally compiled code.
+

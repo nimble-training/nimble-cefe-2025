@@ -1,0 +1,556 @@
+---
+title: "Customizing MCMC and using HMC"
+subtitle: "NIMBLE workshop, CEFE/CNRS, Montpellier, France"
+author: "NIMBLE Development Team"
+date: "November 2025"
+output:
+  slidy_presentation: default
+  beamer_presentation: default
+---
+<style>
+slides > slide {
+  overflow-x: auto !important;
+  overflow-y: auto !important;
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      cache = TRUE)
+library(nimble)
+has_nimbleEcology <- require(nimbleEcology)
+has_compareMCMCs <- require(compareMCMCs)
+if(!has_nimbleEcology)
+  message("This module will use nimbleEcology, which you don't have installed.")
+if(!has_compareMCMCs)
+  message("This module will use compareMCMCs, which you don't have installed.")
+```
+
+# Many MCMC sampling strategies
+
+- There are many different methods ("samplers") for MCMC sampling
+  - Metropolis Hastings
+  - slice sampling
+  - conjugate (Gibbs) sampling
+  - cross-level sampling
+  - block sampling (random walk; automated factor slice sampler; Barker sampler)
+  - See `help(samplers)`
+- NIMBLE is somewhat unique, allowing users to pick-and-choose their own MCMC sampling strategy.
+- Different sampling algorithms vary in terms of computational requirements, and mixing / convergence.
+- All NIMBLE samplers are written as `nimbleFunctions`, and users can modify them or write new ones.
+
+\
+
+### Hamiltonian Monte Carlo
+
+- **Hamiltonian Monte Carlo (HMC)** sampling is one sampling strategy 
+  - Originally called *Hybird* Monte Carlo sampling <a href="https://www.sciencedirect.com/science/article/abs/pii/037026938791197X" target="_blank" style="color: blue">(Duane, et al, 1987)</a>
+- Requires gradients of model density calculations (directional derivatives in parameter space).
+- Applicable to continuous-valued parameters only
+- Has the potential to generate large transitions in parameter space (at high computational cost)
+
+  - The resulting MCMC samples can have low autocorrelation  
+  - They therefore have high information content
+
+\  
+
+<a href="https://chi-feng.github.io/mcmc-demo/app.html" target="_blank" style="color: blue">Animated HMC Demo</a>
+
+MCMC efficiency: mixing and computation time are both important
+=====
+
+Mixing refers to how well the MCMC explores the posterior ("target distribution").
+
+Computation time refers to the time taken by the MCMC.
+
+Efficiency = Effective sample size / computation time.
+
+Pace = 1/Efficiency
+
+**Do not get excited about an MCMC just because it runs quickly.**
+
+Sometimes fancy samplers are too slow to be worthwhile.
+
+We usually ignore setup time because it is less interesting.  We usually don't thin because it confuses comparisons.
+
+# No-U-Turn (NUTS) HMC Sampling
+
+- Standard HMC requires setting tuning parameters:
+  - Integration stepsize
+  - Number of integration steps
+- Performance is highly dependent on "good" choices of these parameters
+
+- No-U-Turn variety of HMC relieves this burden
+  - HMC-NUTS, or just NUTS sampling
+  - <a href="https://www.jmlr.org/papers/volume15/hoffman14a/hoffman14a.pdf" target="_blank" style="color: blue">Hoffman and Gelman, 2014</a>)
+  - Self-tunes these parameters
+  - No manual tuning required
+  - Greatly improves the applicability and ease-of-use of HMC sampling
+
+### Rapid adoption of HMC into mainstream Bayesian analyses 
+
+- Advent of the popular Stan software, which is engineered solely around HMC-NUTS sampling.
+- Inclusion of HMC-NUTS sampling in pyMC3.
+
+\  
+
+### `nimbleHMC` package
+
+- Implementation in the NIMBLE programming langauge
+  - HMC-NUTS sampling is available for NIMBLE, using the `nimbleHMC` package
+
+
+# What's in `nimbleHMC`
+
+The `nimbleHMC` package has two main components:
+
+\  
+
+### 1. HMC Samplers
+
+Provides two distinct HMC samplers, for use in NIMBLE's HMC engine
+
+\  
+
+- **`NUTS`** sampler, implements HMC-NUTS sampling algorithm, identical to that provided in Stan (version 2.32.2).
+  - The default sampler for all HMC-related functions
+
+\  
+
+- **`NUTS_classic`** sampler, implements the original NUTS sampling algorithm
+  - Described in <a href="https://www.jmlr.org/papers/volume15/hoffman14a/hoffman14a.pdf" target="_blank" style="color: blue">Hoffman and Gelman, 2014</a>
+  - Provided for baseline performance and comparisons
+
+\  
+
+ These two samplers (`NUTS`, and `NUTS_classic`) are fully compatible for use in NIMBLE's MCMC engine.
+
+- Can be added to an MCMC configuration object using the `addSampler` method:
+  - `conf$addSampler(target = nodes, type = "NUTS")`
+
+\  
+
+### 2. Convenience Functions
+
+`nimbleHMC` also provides a variety of convenience functions, for adding HMC samplings, and building MCMCs which include HMC samplers:
+
+- **`addHMC`**: adds an HMC sampler to an existing MCMC configuration object 
+- **`configureHMC`**: creates an MCMC configuration object, with HMC applied to all continuous-valued dimensions 
+- **`buildHMC`**: build an MCMC algorithm, with HMC applied to all continuous-valued dimensions 
+- **`nimbleHMC`**: builds, compiles, and executes an MCMC, with HMC applied to all continuous-valued dimensions 
+
+\   
+
+The multitude of these "convenience" functions make them sound more complicated than they are! ...
+
+
+# "Convenience" Functions Explained 
+
+![](img/HMC_convenience_functions.001.png) 
+
+
+# "Convenience" Functions Explained 
+
+![](img/HMC_convenience_functions.002.png) 
+
+What we will do
+=====
+
+1. Set up the AHM simulated occupancy example again.
+2. Learn how to customize the MCMC (sampler) configuration
+3. Learn how to use `compareMCMCs` to track timing and effective sample sizes (ESS).
+4. Write a marginalized version of the occupancy example.
+5. Learn how to assign the NUTS samplers from `nimbleHMC`.
+6. Look at some comparison results.
+
+More details on nimble workflows
+=====
+![](img/NIMBLE_workflow.png)
+
+Back to occupancy example
+=====
+
+### (Repeat AHM example setup if necessary)
+```{r}
+Section10p4_code <- nimbleCode({
+  # Priors
+  mean.p ~ dunif(0, 1)         # Detection intercept on prob. scale
+  alpha0 <- logit(mean.p)      # Detection intercept
+  alpha1 ~ dunif(-20, 20)      # Detection slope on wind
+  mean.psi ~ dunif(0, 1)       # Occupancy intercept on prob. scale
+  beta0 <- logit(mean.psi)     # Occupancy intercept
+  beta1 ~ dunif(-20, 20)       # Occupancy slope on vegHt
+  
+  # Likelihood
+  for (i in 1:M) {
+    # True state model for the partially observed true state
+    z[i] ~ dbern(psi[i])      # True occupancy z at site i
+    logit(psi[i]) <- beta0 + beta1 * vegHt[i]
+    for (j in 1:J) {
+      # Observation model for the actual observations
+      y[i,j] ~ dbern(p.eff[i,j])    # Detection-nondetection at i and j
+      p.eff[i,j] <- z[i] * p[i,j]   # 'straw man' for WinBUGS
+      logit(p[i,j]) <- alpha0 + alpha1 * wind[i,j]
+    }
+  }
+  # Derived quantities are removed.
+}
+)
+
+if(!exists("DO_PLOT"))
+  DO_PLOT <- FALSE
+# Choose sample sizes and prepare obs. data array y
+set.seed(1)                   # So we all get same data set
+M <- 100                      # Number of sites
+J <- 3                        # Number of presence/absence measurements
+y <- matrix(NA, nrow = M, ncol = J) # to contain the obs. data
+
+# Create a covariate called vegHt
+vegHt <- sort(runif(M, -1, 1)) # sort for graphical convenience
+
+# Choose parameter values for occupancy model and compute occupancy
+beta0 <- 0                    # Logit-scale intercept
+beta1 <- 3                    # Logit-scale slope for vegHt
+psi <- plogis(beta0 + beta1 * vegHt) # Occupancy probability
+# plot(vegHt, psi, ylim = c(0,1), type = "l", lwd = 3) # Plot psi relationship
+
+# Now visit each site and observe presence/absence perfectly
+z <- rbinom(M, 1, psi)        # True presence/absence
+
+# Look at data so far
+table(z)
+
+# Plot the true system state
+if(DO_PLOT) {
+  par(mfrow = c(1, 3), mar = c(5,5,2,2), cex.axis = 1.5, cex.lab = 1.5)
+  plot(vegHt, z, xlab="Vegetation height", ylab="True presence/absence (z)", frame = F, cex = 1.5)
+  plot(function(x) plogis(beta0 + beta1*x), -1, 1, add=T, lwd=3, col = "red")
+}
+
+# Create a covariate called wind
+wind <- array(runif(M * J, -1, 1), dim = c(M, J))
+
+# Choose parameter values for measurement error model and compute detectability
+alpha0 <- -2                        # Logit-scale intercept
+alpha1 <- -3                        # Logit-scale slope for wind
+p <- plogis(alpha0 + alpha1 * wind) # Detection probability
+# plot(p ~ wind, ylim = c(0,1))     # Look at relationship
+
+# Take J = 3 presence/absence measurements at each site
+for(j in 1:J) {
+  y[,j] <- rbinom(M, z, p[,j])
+}
+sum(apply(y, 1, max))               # Number of sites with observed presences
+
+# Plot observed data and true effect of wind on detection probability
+if(DO_PLOT) {
+  plot(wind, y, xlab="Wind", ylab="Observed det./nondetection data (y)", frame = F, cex = 1.5)
+  plot(function(x) plogis(alpha0 + alpha1*x), -1, 1, add=T, lwd=3, col = "red")
+}
+# Look at the data: occupancy, true presence/absence (z), and measurements (y)
+cbind(psi=round(psi,2), z=z, y1=y[,1], y2=y[,2], y3=y[,3])
+
+# Create factors
+time <- matrix(rep(as.character(1:J), M), ncol = J, byrow = TRUE)
+hab <- c(rep("A", 33), rep("B", 33), rep("C", 34))  # Must have M = 100
+
+# Bundle and summarize data set
+str( occupancy_data <- list(y = y, 
+                            vegHt = vegHt,
+                            wind = wind,
+                            M = nrow(y),
+                            J = ncol(y)))
+
+# Initial values: must give for same quantities as priors given !
+zst <- apply(y, 1, max)        # Avoid data/model/inits conflict
+occupancy_inits <- function(){
+  list(z = zst, 
+       mean.p = runif(1), 
+       alpha1 = runif(1), 
+       mean.psi = runif(1), 
+       beta1 = runif(1))
+}
+```
+
+Customize the samplers
+=====
+When we go through the setup steps manually, we can modify the sampler choices.
+
+```{r}
+# Separate constants from data for better workflow.
+occupancy_constants <- occupancy_data[c('M','J')]
+occupancy_data2 <- occupancy_data[c('y','vegHt','wind')]
+# Build the model
+occ_model <- nimbleModel(Section10p4_code,
+                         constants = occupancy_constants,
+                         data = occupancy_data2,
+                         inits = occupancy_inits())
+```
+
+Customize the samplers
+=====
+```{r}
+# Build the MCMC configuration
+occ_MCMCconf <- configureMCMC(occ_model)
+# look at the samplers
+occ_MCMCconf$printSamplers()
+```
+Customize the samplers
+=====
+```{r}
+# Change the random walk samplers to slice samplers
+paramNodes <- occ_model$getNodeNames(topOnly = TRUE)
+paramNodes
+occ_MCMCconf$removeSampler(paramNodes)
+for(node in paramNodes)
+  occ_MCMCconf$addSampler(target=node, type="slice")
+# Alternative: occ_MCMCconf$addSampler(target=paramNodes, type="slice", targetByNode=TRUE)
+occ_MCMCconf$printSamplers()
+```
+Customize the samplers
+=====
+```{r}
+# Build the MCMC, compile and run
+occ_MCMC <- buildMCMC(occ_MCMCconf)
+Cocc_model <- compileNimble(occ_model)
+Cocc_MCMC <- compileNimble(occ_MCMC, project=Cocc_model)
+# Alternative: compiled <- compileNimble(occ_model, occ_MCMC)
+samples <- runMCMC(Cocc_MCMC, niter = 10000, nburnin=1000)
+summary(samples)
+```
+Using `nimbleHMC`
+=====
+
+- The NUTS samplers in `nimbleHMC` are just like any other nimble samplers.
+- NIMBLE (uniquely?) can combine HMC with other samplers.
+
+```{r}
+library(nimbleHMC)
+occ_model <- nimbleModel(Section10p4_code,
+                         constants = occupancy_constants,
+                         data = occupancy_data2,
+                         inits = occupancy_inits(),
+                         buildDerivs = TRUE) # WE NEED AUTOMATIC DERIVATES FOR HMC
+occ_MCMCconf <- configureMCMC(occ_model)
+paramNodes <- occ_model$getNodeNames(topOnly = TRUE)
+occ_MCMCconf$removeSampler(paramNodes)
+occ_MCMCconf$addSampler(target=paramNodes, type="NUTS")
+# Alternative: addHMC(occ_MCMCconf, paramNodes)
+occ_MCMCconf$printSamplers()
+```
+
+Run HMC
+=====
+```{r}
+occ_MCMC <- buildMCMC(occ_MCMCconf)
+Cocc_model <- compileNimble(occ_model)
+Cocc_MCMC <- compileNimble(occ_MCMC, project=Cocc_model) # much longer due to AD
+HMCsamples <- runMCMC(Cocc_MCMC, niter=2000, nburnin=1000) # burn-in ("warmup") is typically half of niter (default)
+summary(HMCsamples)
+```
+Run some comparisons with `compareMCMCs`
+=====
+Package `compareMCMCs` provides tools for timing, running multiple methods, and generating comparison metrics and figures.
+
+It uses `nimble` natively but also supports Stan and provides hooks to run other MCMC engines.
+
+Custom `nimble` configurations can be provided via functions (or other ways).
+
+Let's compare (for the 4 parameters):
+
+- default samplers
+- slice samplers
+- NUTS
+- Barker block sampler
+
+Run some comparisons with `compareMCMCs`
+=====
+Make a function to return each configuration.
+```{r}
+confSlice <- function(model) {
+  conf <- configureMCMC(model)
+  paramNodes <- model$getNodeNames(topOnly=TRUE)
+  conf$replaceSamplers(paramNodes, type="slice", targetByNode=TRUE)
+  conf
+}
+confHMC <- function(model) {
+  conf <- configureMCMC(model)
+  paramNodes <- model$getNodeNames(topOnly=TRUE)
+  conf$removeSampler(paramNodes)
+  conf$addSampler(paramNodes, type="NUTS")
+  conf
+}
+confBarker <- function(model) {
+  conf <- configureMCMC(model)
+  paramNodes <- model$getNodeNames(topOnly=TRUE)
+  conf$removeSampler(paramNodes)
+  conf$addSampler(paramNodes, type="barker")
+  conf
+}
+```
+
+Run some comparisons with `compareMCMCs`
+=====
+```{r}
+occ_model <- nimbleModel(Section10p4_code,
+                         constants = occupancy_constants,
+                         data = occupancy_data2,
+                         inits = occupancy_inits(),
+                         buildDerivs = TRUE) 
+comparisons1 <- compareMCMCs(
+  list(model=occ_model),
+  nimbleMCMCdefs=list(myslice='confSlice',Barker='confBarker'),
+  MCMCs=c('nimble','myslice','Barker'),
+  MCMCcontrol = list(niter=20000, burnin=1000)
+)
+comparisons2 <- compareMCMCs(
+  list(model=occ_model),
+  nimbleMCMCdefs=list(HMC='confHMC'),
+  MCMCs=c('HMC'),
+  MCMCcontrol = list(niter=2000, burnin=1000)
+)
+```
+
+Run some comparisons with `compareMCMCs`
+=====
+```{r echo=FALSE}
+comparisons <- c(comparisons1, comparisons2)
+make_MCMC_comparison_pages(comparisons, dir="MCMC_comparisons_occ_orig")
+```
+
+```{r eval=FALSE}
+comparisons <- c(comparisons1, comparisons2)
+make_MCMC_comparison_pages(comparisons, dir="MCMC_comparisons_occ")
+```
+
+Comparison results that come with these slides are [here](MCMC_comparisons_occ_orig/model.html)
+
+Comparison results if you ran the code yourself are [here](MCMC_comparisons_occ/model.html).
+
+Comparisons for marginalized version using `dOcc_v`
+=====
+Make marginalized version using `dOcc_v`
+```{r}
+library(nimbleEcology)
+Section10p4_code_dOcc <- nimbleCode({
+  # Priors
+  mean.p ~ dunif(0, 1)         # Detection intercept on prob. scale
+  alpha0 <- logit(mean.p)      # Detection intercept
+  alpha1 ~ dunif(-20, 20)      # Detection slope on wind
+  mean.psi ~ dunif(0, 1)       # Occupancy intercept on prob. scale
+  beta0 <- logit(mean.psi)     # Occupancy intercept
+  beta1 ~ dunif(-20, 20)       # Occupancy slope on vegHt
+  
+  # Likelihood
+  for (i in 1:M) {
+    # True state model for the partially observed true state
+    logit(psi[i]) <- beta0 + beta1 * vegHt[i]
+    for (j in 1:J) {
+      # Observation model for the actual observations
+      logit(p[i,j]) <- alpha0 + alpha1 * wind[i,j]
+    }
+    y[i, 1:J] ~ dOcc_v(psi[i], p[i,1:J], len=J)
+  }
+  # Derived quantities are removed.
+}
+)
+```
+
+
+Comparisons for marginalized version using `dOcc_v`
+=====
+Build the model
+```{r}
+# Separate constants from data for better workflow.
+occupancy_constants <- occupancy_data[c('M','J')]
+occupancy_data2 <- occupancy_data[c('y','vegHt','wind')]
+occ_model_dOcc <- nimbleModel(Section10p4_code_dOcc,
+                         data = occupancy_data2,
+                         constants = occupancy_constants,
+                         inits = occupancy_inits(),
+                         buildDerivs=TRUE)
+```
+
+Comparisons for marginalized version using `dOcc_v`
+=====
+```{r}
+library(compareMCMCs)
+comparisons1_dOcc <- compareMCMCs(
+  list(model=occ_model_dOcc),
+  nimbleMCMCdefs=list(myslice='confSlice',Barker='confBarker'),
+  MCMCs=c('nimble','myslice','Barker'),
+  MCMCcontrol = list(niter=20000, burnin=1000)
+)
+comparisons2_dOcc <- compareMCMCs(
+  list(model=occ_model_dOcc),
+  nimbleMCMCdefs=list(HMC='confHMC'),
+  MCMCs=c('HMC'),
+  MCMCcontrol = list(niter=2000, burnin=1000)
+)
+comparisons_dOcc <- c(comparisons1_dOcc, comparisons2_dOcc)
+```
+
+Comparisons for marginalized version using `dOcc_v`
+=====
+```{r echo=FALSE}
+comparisons_dOcc <- c(comparisons1_dOcc, comparisons2_dOcc)
+make_MCMC_comparison_pages(comparisons_dOcc, dir="MCMC_comparisons_occ_dOcc_orig")
+```
+
+```{r eval=FALSE}
+comparisons_dOcc <- c(comparisons1_dOcc, comparisons2_dOcc)
+make_MCMC_comparison_pages(comparisons_dOcc, dir="MCMC_comparisons_occ_dOcc")
+```
+
+Comparison results that come with these slides are [here](MCMC_comparisons_occ_dOcc_orig/model.html)
+
+Comparison results if you ran the code yourself are [here](MCMC_comparisons_occ_dOcc/model.html).
+
+
+Some strategies for improving MCMC
+=====
+
+ - Customize sampler choices. E.g.,
+    - Try sampling standard deviations on a log scale
+    - Try slice samplers instead of Metropolis-Hastings
+    - Try blocking correlated parameters (`RW_block`, `AFSS` or `barker`)
+    - Try multiple samplers for slow-mixing parameters
+ - Reparameterize
+    - Center covariates
+    - Try centered versus non-centered random effects parameterizations (or use `uncentered` sampler)
+    - Rotate coordinates to reduce posterior correlation
+ - Rewrite the model. E.g.,
+    - Rewrite the model to reduce dependencies
+    - Vectorize declarations if it will computational efficiency
+    - Marginalize to remove parameters (latent states)
+ - (Advanced) Write new samplers that take advantage of particular model structures
+
+Sampler choices 
+=====
+
+Sampler choices:
+
+- Sampling standard deviations on the  log scale can help, especially when there is posterior support near 0.
+- Slice sampling can help mix a parameter at some computational cost.
+- Hamiltonian Monte Carlo (HMC) can help mix blocks of parameters (often all parameters at once) but at heavy computational cost.
+- Blocking can help when parameters are correlated *given other parameters*.
+    - If parameters are *marginally correlated* but *conditionally independent*, blocking will not help.
+    - This occurs if parameters are marginally correlated only because they both depend on something else.
+- Model-specific understanding can yield good sampling strategies.
+
+Centering covariates or random effects
+=====
+
+Centering refers to two issues:
+
+- Centering of covariates as they are provided for the analysis.
+    - Think of $y_i = \beta_0 + \beta_1 x_i + \epsilon_i$. 
+    - If the $x_i$ are not centered, then considering $\beta_1 \rightarrow \beta_1'$ is also like adding $(\beta_1' - \beta_1) \bar{x}$ to the intercept.
+    - A standard result in linear regression is that estimates of $\beta_0$ and $\beta_1$ are correlated.
+    - Centering $x_i$ around its mean removes the posterior correlation between $\beta_0$ and $\beta_1$.
+
+- Random effects with a mean of zero (non-centered parameterization) versus centered around a mean (centered parameterization).
+    - E.g., `random_effect ~ N(0, sd)` vs. `random_effect ~ N(mean, sd)`.
+    - Theory shows either parameterization can be better, depending on the model and data, but with reasonable amount of data, centered is often better.
+    - However, for HMC, uncentered is generally better!
+

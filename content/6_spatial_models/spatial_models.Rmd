@@ -1,0 +1,521 @@
+---
+title: "Spatial models in NIMBLE"
+subtitle: "NIMBLE workshop, CEFE/CNRS, Montpellier, France"
+author: "NIMBLE Development Team"
+date: "November 2025"
+output:
+  slidy_presentation: default
+  beamer_presentation: default
+---
+
+<style>
+slides > slide {
+  overflow-x: auto !important;
+  overflow-y: auto !important;
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE)
+library(nimble)
+#library(compareMCMCs)
+recalculate <- TRUE
+```
+
+Spatial models (also useful as non-parametric regression components)
+=====
+
+Methods for spatial models in `nimble` include:
+
+  - Conditional auto-regressive (CAR) models
+  - Gaussian process models defined by correlation decaying with distance.
+  - Gaussian process models defined by spline basis functions
+  
+\
+
+Intrinsic conditional autoregressive (ICAR) models
+=====
+
+Intuitively expressed as one-at-a-time conditionals:
+
+$$ x_i|x_{-i} \sim N\left(\frac{1}{n_i} \sum_{j\in N_i} x_j, \frac{1}{n_i \tau}\right) $$
+
+The prior for each $x_i$ has:
+
+- mean: the mean of its neighbors 
+- variance: inversely proportional to the number of neighbors. 
+
+This seems paradoxical, but it works.
+
+Model code:
+
+```{r, eval=FALSE}
+x[1:N] ~ dcar_normal(adj[1:L], weights[1:L], num[1:N], 
+                     tau, c, zero_mean)
+```
+
+NIMBLE's MCMC configuration will use a special sampler that updates each `x[i]` one by one (using conditionality).
+
+\
+
+ICAR (cont): What does 'intrinsic' mean?
+=====
+
+This is an **improper prior** because it does not integrate to one.
+
+The value of the prior doesn't change if you shift all the $x_{i}$ values by a constant.
+
+Thus the model implicitly includes an intercept with a flat prior.
+
+Often one would therefore exclude an overall intercept from the model (`zero_mean=TRUE`).
+
+It is usually fine to use `zero_mean=FALSE`.
+
+This is also weird because the marginal prior variance of each $x_i$ is infinite, but it works.
+
+(This is akin to a non-stationary (unit root) AR(1) model with $\rho = 1$:
+
+$$ x_i \sim N(\rho x_{i-1}, \sigma^2) $$
+
+which is generally frowned upon in the time series literature. But it's often recommended in the spatial context.)
+
+\
+
+ICAR (cont):  Neighborhood/adjacency information
+=====
+
+Suppose we have 4 spatial locations in a square grid:
+
+```{r, fig.cap = '', fig.height=4, fig.width=4, echo = FALSE, eval=recalculate}
+locs <- cbind(c(-1,1,-1,1),c(-1,-1,1,1)) 
+plot(locs, type = 'n', xlab = '', ylab = '', xaxt = 'n', yaxt = 'n')
+abline(v=0); abline(v=2); abline(v=-2)
+abline(h=0); abline(h=2); abline(h=-2)
+text(locs[,1]/2, locs[,2]/2, as.character(1:4), cex = 3)
+```
+
+Then we would have:
+
+```{r, eval=FALSE}
+num <- c(2, 2, 2, 2)  # each location has two neighbors
+adj <- c(2, 3,        # neighbors of loc'n 1
+	      1, 4,         # neighbors of loc'n 2
+	      1, 4,         # etc.
+	      2, 3)
+```
+
+There are various NIMBLE and R functions for producing `adj` and `num` from shapefiles and other geographic formats. 
+
+\
+
+ICAR (cont): Example: disease mapping
+=====
+
+- (Classic) example: hospital admissions due to respiratory disease in 2010 from the 134 Intermediate Geographies (IG) north of the river Clyde in the Greater Glasgow and Clyde health board. 
+
+- Data available in the `CARBayesdata` package.
+- Transform into neighborhood information using functions from the `spdep` package. 
+- We need vectors indicating 
+
+  - which regions are neighbors of which other regions (`adj`),
+  - weights for each pair of neighbors (`weights`), 
+  - the number of neighbors for each region (`num`) (to unpack `adj` correctly).
+
+- Modeled mean of the Poisson counts includes an offset for the expected count (e.g. population size). 
+- Covariate: the percentage of people defined as income-deprived in each region.
+
+
+```{r, fig.cap='', fig.width=12, fig.height=7, eval=recalculate}
+library(CARBayesdata, quietly = TRUE)
+library(sp, quietly = TRUE)
+library(spdep, quietly = TRUE)
+library(classInt)
+## data(GGHB.IG) ## apparently no longer in CARBayesdata
+load('GGHB.IG.Rda')
+data(respiratorydata)
+
+respiratorydata_sp <- merge(x = GGHB.IG, y = respiratorydata, by.x = "IG",
+                            by.y = "IZ", all.x = FALSE)
+respiratorydata_sp <- spTransform(respiratorydata_sp,
+                                  CRS("+proj=longlat +datum=WGS84 +no_defs"))
+
+if(FALSE) { 
+  # This will produce an image on top of an OpenStreetMap webpage}
+  library(leaflet)
+  colors <- colorNumeric(palette = "YlOrRd", domain = respiratorydata_sp@data$SMR)
+  map2 <- leaflet(data=respiratorydata_sp) %>%
+    addPolygons(fillColor = ~colors(SMR), color="", weight=1,
+                fillOpacity = 0.7) %>%
+    addLegend(pal = colors, values = respiratorydata_sp@data$SMR, opacity = 1,
+              title="SMR") %>%
+    addScaleBar(position="bottomleft")
+  map2
+}
+
+# Instead, make a simple map in R
+temp.colors<-function(n = 25) {
+  m <- floor(n/2)
+  blues <- hsv(h=.65, s=seq(1,0,length=m+1)[1:m])
+  reds <- hsv(h=0, s=seq(1,0,length=m+1)[1:m])
+  c(blues,if(n%%2!=0) "#FFFFFF", reds[m:1])
+}
+
+q <- classIntervals(respiratorydata_sp@data$SMR ,style = "fixed",
+                    fixedBreaks=seq(0.3, 1.7, by = 0.1))
+pal <- temp.colors(12)
+col <- findColours(q, pal)
+plot(respiratorydata_sp, col = col, border = 'grey', lwd = 0.4)
+```
+
+\
+
+ICAR (cont): Neighborhood/adjacency information
+=====
+
+We handle the neighborhood structure here with `nb2WB` from the package `spdep`.
+
+```{r, eval=recalculate}
+W_nb <- poly2nb(respiratorydata_sp, row.names =  rownames(respiratorydata_sp@data))
+## Determine neighborhood/adjacency information needed for neighborhood-based CAR model
+nbInfo <- nb2WB(W_nb)
+
+# A vector of indices indicating which regions are neighbors of which.
+head(nbInfo$adj, n = 30)
+# A vector of weights. In this case, all weights are 1.
+head(nbInfo$weights)
+# A vector of length N indicating how many neighbors each region has.
+# This helps map the adj vector to each region.
+nbInfo$num
+```
+
+Now we have the three pieces of information we need. We're ready to use the `dcar_normal` distribution in a nimble model.
+
+\
+
+ICAR (cont): nimble model
+=====
+
+```{r, eval=recalculate}
+code <- nimbleCode({
+  # priors
+  beta ~ dnorm(0, sd = 100)
+  sigma ~ dunif(0, 100)   # prior for variance components based on Gelman (2006)
+  tau <- 1 / sigma^2
+  # latent process
+  x[1:N] ~ dcar_normal(adj[1:L], weights[1:L], num[1:N], tau, zero_mean = 0)
+  # likelihood
+  for(i in 1:N) {
+    lambda[i] <- expected[i] * exp(beta*z[i] + x[i])
+    y[i] ~ dpois(lambda[i])
+  }
+})
+
+z <- respiratorydata_sp$incomedep
+z <- z - mean(z)  # center for improved MCMC performance
+
+set.seed(1)
+
+nregions <- nrow(respiratorydata_sp)
+expected <- respiratorydata_sp$expected
+y <- respiratorydata_sp$observed
+constants <- list(N = nregions, L = length(nbInfo$adj), 
+                  adj = nbInfo$adj, weights = nbInfo$weights, num = nbInfo$num,
+                  z = z, expected = expected)
+data <- list(y = y)
+inits <- list(beta = 0, sigma = 1, x = rnorm(nregions))
+
+model <- nimbleModel(code, constants = constants, data = data, inits = inits)
+cModel <- compileNimble(model)
+
+conf <- configureMCMC(model, monitors = c('beta', 'sigma', 'x'))
+conf$printSamplers()
+
+MCMC <- buildMCMC(conf)
+cMCMC <- compileNimble(MCMC, project = cModel)
+samples <- runMCMC(cMCMC, niter = 5000, nburnin = 1000, thin = 10)
+```
+
+\
+
+ICAR (cont):  Results
+=====
+
+MCMC mixing looks pretty good (not always the case for spatial models).
+
+```{r, fig.cap='', fig.height=5, fig.width=12, eval=recalculate}
+par(mfrow = c(1,4))
+ts.plot(samples[ , 'sigma'], main = 'sigma')
+ts.plot(samples[ , 'x[5]'], main = 'x[5]')
+ts.plot(samples[ , 'x[50]'], main = 'x[50]')
+ts.plot(samples[ , 'beta'], main = 'beta')
+```
+
+We can look at the map of the estimated relative risks. Note the scale is very different than of the standardized mortality ratio raw values.
+
+```{r, fig.caption='', fig.width=12, fig.height=7, eval=recalculate}
+xCols <- grep('^x\\[', colnames(samples))
+xEstCAR <- colMeans(samples[ , xCols])
+
+q <- classIntervals(xEstCAR,style = "fixed",fixedBreaks=seq(-0.8, 0.8, by = 0.1))
+pal <- temp.colors(16)
+col <- findColours(q, pal)
+
+par(mfrow = c(1,1))
+plot(respiratorydata_sp, col = col, border = 'grey', lwd = 0.4)
+```
+
+\
+
+Proper CAR model (we will not cover this)
+=====
+
+One can avoid the improper ICAR prior by using what looks like a time series AR(1) model. Omitting any weights and with mean zero, the simplest case is:
+
+$$ x_i|x_{-i} \sim N \left(\frac{1}{n_i} \rho \sum_{j\in N_i} x_j, \frac{1}{n_i \tau}\right) $$
+
+The presence of $\rho$ causes the prior to be proper (under certain constraints on $\rho$).
+
+This looks more like the usual AR(1) model with the somewhat non-intuitive property that the prior mean is a proportion of the average of the neighbors. The result is a model where the relationship of $\rho$ to the spatial correlation structure is not intuitive and even modest spatial correlation results in very large values of $\rho$. 
+
+Note: when the number of neighbors is roughly the same for all locations the Leroux model can be seen to be approximately a variation on this model. 
+
+\
+
+Gaussian processes
+=====
+
+- Multivariate normal priors at a finite set of locations.
+- Correlation between points decays with distance by some function with parameters to estimate.
+- No special nimble functionality if needed.
+- Sometimes used for areal data, evaluated at the centroids of the areas.
+- More commonly used for continuous data or regularly-gridded data.
+- For simplicity, we'll use the example from the CAR model (above).
+
+```{r, eval=recalculate}
+code <- nimbleCode({
+  mu0 ~ dnorm(0, sd = 100)
+  sigma ~ dunif(0, 100)  # prior for variance components based on Gelman (2006)
+  rho ~ dunif(0, 5)
+  beta ~ dnorm(0, sd = 100)
+  
+  # latent spatial process
+  mu[1:N] <- mu0*ones[1:N]
+  cov[1:N, 1:N] <- sigma*sigma*exp(-dists[1:N, 1:N] / rho)
+  x[1:N] ~ dmnorm(mu[1:N], cov = cov[1:N, 1:N])
+  # likelihood
+  for(i in 1:N) {
+    lambda[i] <- expected[i] * exp(beta*z[i] + x[i])
+    y[i] ~ dpois(lambda[i])
+  }
+})
+
+locs <-  as.matrix(respiratorydata_sp@data[ , c('easting', 'northing')]) / 1e5
+dists <- as.matrix(dist(locs))
+dists <- dists / max(dists)  # normalize to max distance of 1
+
+constants <- list(N = nregions, dists = dists, ones = rep(1, nregions),
+                            z = z, expected = expected)
+data <- list(y = y)
+inits <- list(beta = 0, mu0 = 0, sigma = 1, rho = 0.2)
+
+set.seed(1)
+
+## setup initial spatially-correlated latent process values
+inits_cov <- inits$sigma^2 * exp(-dists / inits$rho)
+inits$x <-  t(chol(inits_cov)) %*% rnorm(nregions)
+inits$x <- inits$x[ , 1]  # so can give nimble a vector rather than one-column matrix
+
+model <- nimbleModel(code, constants = constants, data = data, inits = inits)
+cModel <- compileNimble(model)
+```
+
+# Gaussian processes (continued): Running an MCMC
+
+In order to improve mixing, we'll customize a tuning parameter for the block random walk (Metropolis)
+sampler on the latent spatial values.
+
+```{r, eval=recalculate}
+conf <- configureMCMC(model)
+conf$addMonitors('x')
+conf$removeSamplers('x[1:134]')
+## Changing a tunable parameter in the adaptation of RW_block makes a big difference.
+conf$addSampler('x[1:134]', 'RW_block', control = list(adaptFactorExponent = 0.25))
+
+MCMC <- buildMCMC(conf)
+cMCMC <- compileNimble(MCMC, project = cModel)
+samples <- runMCMC(cMCMC, niter = 10000, nburnin = 5000, thin = 5)
+```
+
+\
+
+Gaussian processes (continued): Results
+=====
+
+MCMC mixing could be better (often the case for spatial models), but is not terrible. We'd want to run for longer.
+
+```{r, fig.cap='', fig.width=10, fig.height=6, eval=recalculate}
+par(mfrow = c(2,3))
+ts.plot(samples[ , 'rho'], main = 'rho')
+ts.plot(samples[ , 'sigma'], main = 'sigma')
+ts.plot(samples[ , 'beta'], main = 'beta')
+ts.plot(samples[ , 'x[5]'], main = 'x[5]')
+ts.plot(samples[ , 'x[50]'], main = 'x[50]')
+ts.plot(samples[ , 'x[100]'], main = 'x[100]')
+```
+
+We can look at the map of the estimated relative risks. Note the scale is very different than of the standardized mortality ratio raw values.
+
+```{r, fig.cap='', fig.width=12, fig.height=7, eval=recalculate}
+xCols <- grep('^x\\[', colnames(samples))
+xEstGP <- colMeans(samples[ , xCols])
+
+q <- classIntervals(xEstGP, style = "fixed", fixedBreaks=seq(-1.2, 1.2, by = 0.2))
+pal <- temp.colors(12)
+col <- findColours(q, pal)
+
+par(mfrow = c(1,1))
+plot(respiratorydata_sp, col = col, border = 'grey', lwd = 0.4)
+```
+
+# Large spatial models and spatial nonstationarity
+
+The `BayesNSGP` package has functionality for fitting such models efficiently based on recent advances in the literature.
+
+# Splines (for spatial models or other nonparametric regression)
+
+- Another kind of Gaussian process.
+- `mgcv` is a major spline/GAM package and has functions to set up pieces for use in JAGS or NIMBLE.
+`mgcv` can handle all sorts of sophisticated smoothing problems, including:
+
+   - tensor products of space and time or of different covariates
+   - cyclic splines (e.g., for seasonality, diurnal behavior)
+   - monotonicity and other shape constraints
+   - boundary effects
+
+For example, Stoner and Economou (2020; Computational Statistics and Data Analysis; https://arxiv.org/abs/1906.03846) used mgcv-based spline terms in a NIMBLE model for precipitation, handling seasonality with cyclic splines.
+
+\
+
+Splines (cont): setup from `mgcv`
+=====
+
+- (Technical: The spline penalty matrix serves as the inverse correlation matrix for the prior. The spline smoothing parameter is a variance or variance ratio.)
+
+$$ x = B \beta $$
+
+$$ \beta \sim \mbox{MVN}(0, \mbox{prec} = Q) $$
+
+- `B` are spline basis function evaluations (obtained from `mgcv`)
+- `beta` is a coefficient vector to be estimated
+- `Q` is the spline penalty matrix (obtained from `mgcv`) times a variance parameter to be estimated.
+- Actually the `Q` provided by `mgcv` includes some unpenalized dimensions  (constant and linear) so it needs to be split into two pieces (penalized and unpenalized).
+
+
+```{r, eval=recalculate}
+K <- 40 # number of spline basis functions
+# fit a simple GAM to get a sense for number of basis functions; K = 40 might be too small...
+if(FALSE) {
+  mod <- gam(y ~ log(expected) + z + s(locs, k = K), family = 'poisson')
+  summary(mod)
+  fit <- predict(mod, type = 'terms')[,3]
+}
+
+# ignore z to get basis info, but that may affect initial values.
+out <- mgcv::jagam(y ~ log(expected) + s(locs, k = K) -1, family = 'poisson', 
+                   na.action = na.pass, file = 'blank.jags')
+B <- out$jags.data$X[ , -1]
+K <- ncol(B)   # actually only 39 basis functions
+## two components of precision matrix to ensure propriety
+## of prior on coeffs (see Wood (2016) J Statistical Software)
+Q1 <- out$jags.data$S1[ , 1:K]
+Q2 <- out$jags.data$S1[ , (K+1):(2*K)]  
+```
+
+\
+
+Splines (cont): Setting up the model
+=====
+
+We'll stick with a simple spatial model (which means this could have simply been fit using `mgcv::gam`):
+
+```{r, eval=recalculate}
+codeS <- nimbleCode({
+  mu0 ~ dflat()
+  beta_z ~ dnorm(0, sd = 100)
+  for(i in 1:2) 
+    lambda[i]  ~ dgamma(.05, .005)  # based on jagam defaults
+  
+  # latent process is product of (known) spline basis and (unknown) coefficients
+  # two components to ensure propriety of prior on coeffs
+  prec[1:K, 1:K] <- lambda[1] * Q1[1:K, 1:K] + lambda[2] * Q2[1:K, 1:K]
+  beta_x[1:K] ~ dmnorm(zeros[1:K], prec[1:K, 1:K])
+  x[1:N] <-  (B[1:N, 1:K] %*% beta_x[1:K])[,1]
+  
+  # likelihood
+  for(i in 1:N) {
+    mu[i] <- expected[i] * exp(mu0 + beta_z*z[i] + x[i])
+    y[i] ~ dpois(mu[i])
+  }
+})
+
+constantsS <- list(Q1 = Q1, Q2 = Q2, B = B, K = K, N = nregions, z = z, zeros = rep(0, K), 
+                            expected = expected)
+dataS <- list(y = y)
+initsS <- list(beta_z = 0)
+## Use inits from jagam, but note that jagam call did not use 'z' or have an intercept
+initsS$beta_x <-  out$jags.ini$b[2:(K+1)]
+initsS$mu0 <- 0
+initsS$lambda <- out$jags.ini$lambda
+
+set.seed(1)
+modelS <- nimbleModel(codeS, constants = constantsS, data = dataS, inits = initsS)
+cModelS <- compileNimble(modelS)
+```
+
+\
+
+Splines (cont): Running an MCMC
+=====
+
+```{r, eval=recalculate}
+confS <- configureMCMC(modelS)
+confS$removeSamplers('beta_x[1:39]')
+# Using non-default value of 0.25 for a tuning parameter of the adaptive block sampler 
+# helps a lot compared to default NIMBLE or to JAGS
+confS$addSampler('beta_x[1:39]', 'RW_block', control = list(adaptFactorExponent = 0.25))
+confS$addMonitors('x', 'beta_x')
+
+mcmcS <- buildMCMC(confS)
+cmcmcS <- compileNimble(mcmcS, project = cModelS)
+samplesS <- runMCMC(cmcmcS, niter = 100000, nburnin = 20000, thin = 80)
+```
+
+\
+
+Splines (cont): Results
+=====
+
+Mixing is decent (though that was a pretty long run). One could explore other sampling strategies.
+
+```{r, fig.cap='', fig.width=12, fig.height=6, eval=recalculate}
+par(mfrow = c(2,3))
+ts.plot(samplesS[ , 'lambda[1]'], main = 'lambda[1]')
+ts.plot(samplesS[ , 'lambda[2]'], main = 'lambda[2]')
+ts.plot(samplesS[ , 'beta_z'], main = 'beta_z')
+ts.plot(samplesS[ , 'x[5]'], main = 'x[5]')
+ts.plot(samplesS[ , 'x[50]'], main = 'x[50]')
+ts.plot(samplesS[ , 'x[100]'], main = 'x[100]')
+```
+
+Here are the spatial estimates. Pretty different than the CAR or GP results. We might want to explore larger values of K.
+
+```{r, fig.cap='', fig.width=12, fig.height=7, eval=recalculate}
+xCols <- grep('^x\\[', colnames(samplesS))
+xEstSpl <- colMeans(samplesS[ , xCols])
+
+q <- classIntervals(xEstSpl, style = "fixed", fixedBreaks=seq(-0.2, 0.2, by = 0.04))
+pal <- temp.colors(10)
+col <- findColours(q, pal)
+par(mfrow = c(1,1))
+plot(respiratorydata_sp, col = col, border = 'grey', lwd = 0.4)
+```

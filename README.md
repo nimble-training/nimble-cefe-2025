@@ -71,5 +71,5 @@ install.packages(c("nimbleHMC", "mcmcplots", "coda", "nimbleEcology", "compareMC
 We will use some other packages to set up various examples. To be able to run everything in the workshop materials, you will also want:
 
 ```
-install.packages(c("CARBayesdata","sp","spdep","classInt", "glmmTMB"))
+install.packages(c("CARBayesdata","sp","spdep","classInt", "glmmTMB", "mcmcse", "nimbleMacros"))
 ```

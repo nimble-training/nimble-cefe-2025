@@ -1,0 +1,506 @@
+---
+title: "Overview of recent and advanced features in NIMBLE"
+subtitle: "NIMBLE workshop, CEFE/CNRS, Montpellier, France"
+author: "NIMBLE Development Team"
+date: "November 2025"
+output:
+  slidy_presentation: default
+  beamer_presentation: default
+---
+<style>
+slides > slide {
+  overflow-x: auto !important;
+  overflow-y: auto !important;
+}
+</style>
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      cache = TRUE)
+library(nimble)
+library(nimbleMacros)
+recalculate<-TRUE
+```
+
+NIMBLE is in active development!
+=====
+I'll highlight:
+
+- `nimbleMacros` to write models more compactly and build packages using `nimble`.
+- More powerful user-defined functions and distributions.
+- Automatic parameter transform
+- Bayesian non-parametric (BNP) distributions.
+- Reversible Jump MCMC for variable selection.
+- Spatial capture-recapture
+- Longer-term: better nimble workflows
+
+On some topics I put in extra slides for those interested to read on your own.
+
+`nimbleMacros`
+=====
+People often repeatedly write the same idioms in model code, such as generalized linear mixed models (as components of larger models).
+
+[`nimbleMacros`](https://CRAN.R-project.org/package=nimbleMacros) enables more compact coding.
+
+From the [`nimbleMacros` vignette](https://cran.r-project.org/web/packages/nimbleMacros/vignettes/nimbleMacros.html)
+
+```{r}
+library(nimbleMacros)
+data(mtcars) # a built-in dataset with base R
+summary(mtcars) # am = 0 for automatic, 1 for manual transmission. mpg=miles per gallon
+const <- mtcars[c("am", "mpg")]
+pr <- setPriors(intercept = quote(dunif(-10,10)), 
+                coefficient = quote(dnorm(0, 0.1)))
+code <- nimbleCode({
+  LM(am ~ scale(mpg), family = binomial, priors = pr) #LM is a model macro
+})
+mod <- nimbleModel(code = code, constants = const)
+mod$getCode()
+```
+
+- Everything works as if the code had been hand-written in the expanded form.
+- Random effects and priors are supported.
+- You can write any other code in the same model.
+- You need to keep track of introduced variables, but there are tools to get those.
+- You can write new macros to expand compact code into full model code.
+- You can more easily write packages that use nimble by relying on model macros.
+
+More powerful user-defined functions and distributions
+=====
+A basic distinction in programming:
+
+- Simple functions do not normally retain information between calls.
+- Classes (object-oriented programming) have internal variables ("states") to use in functions ("methods")
+
+`nimbleFunction` supports both simple functions and classes (when the `nimbleFunction` has "`setup`" code).
+
+Now the latter can be used in models. Toy example: hold portions of data or covariates outside of the model.
+
+```{r}
+set.seed(1)
+x <- rnorm(10)
+y <- rnorm(10, mean = 0.2 * x)
+embed_dnorm <- nimbleFunction(
+  setup=function(x, y) {},
+  methods=list(
+    dcustom=function(x=double(), alpha = double(), 
+                     beta=double(), sd=double(), log=logical(0, default=FALSE)) {
+      logProb <- sum(dnorm(y, mean = alpha+beta*x, sd = sd, log=TRUE))
+      if(log) return(exp(logProb))
+      return(logProb)
+      returnType(double())
+    }
+  )
+)
+myDist <- embed_dnorm(x, y)
+modelCode <- nimbleCode({
+  beta ~ dnorm(0, sd=100)
+  alpha ~ dnorm(0, sd = 100)
+  sd ~ dunif(0, 20)
+  dummy ~ myDist$dcustom(alpha, beta, sd)
+})
+model <- nimbleModel(modelCode,
+                     data = list(dummy=1),
+                     inits=list(alpha=0, beta=0, sd=1))
+model$calculate()
+# cmodel <- compileNimble(model) # This works too but is not run here.
+# cmodel$calculate()
+```
+
+- `dummy` is a node in the model representing the data `y`, but its value is not actually used.
+- The model object will be much smaller than if `x` and `y` were in the model, allowing faster compilation and less memory use.
+- You can be creative with models.
+
+Automatic parameter transformations
+=====
+
+Many algorithms work better in unconstrained parameter spaces.
+
+Example: If `sigma ~ dunif(0, 20)`, then any MCMC or optimization algorithm will have issues exploring outside the constraint [0, 20].
+
+The built-in `nimbleFunction` called `parameterTransform` provides a generic way to map from constrained to unconstrained parameter spaces and back.
+
+This is used for example by the NUTS (HMC) sampler and Laplace approximation. You can use it in new algorithms that you write.
+
+Bayesian non-parametric (BNP) distributions
+=====
+Random effects (and residuals) are very often assumed to be normally distributed without checking or alternatives.
+
+Non-parametric distributions are "arbitrary", or at least very flexible.
+
+Mixtures of normal distributions can be used for this purpose.
+
+Here are two examples:
+
+```{r, eval=TRUE}
+weights <- c(1, .5, .25, .125)
+weights <- weights / sum(weights)
+centers <- c(-1, 0, 1, 2)
+sds <- c(0.5, 0.6, 0.7, 0.8)
+x <- seq(-3, 4, by = 0.05)
+pdf <- x |> lapply(\(x) sum(weights * dnorm(x, centers, sds))) |> unlist()
+{
+  plot(x, pdf, type ='l', col = "red", lwd = 1.5,
+       main = "Example of normal mixture (unimodal)",
+       ylim = c(0, max(c(weights, pdf))))
+  for(i in seq_along(weights)) {
+    points(x, weights[i] * dnorm(x, centers[i], sds[i]), type = 'l' )
+    points(c(centers[i], centers[i]), c(0, weights[i]), type = 'l', col = 'blue')
+  }
+}
+```
+
+```{r, eval=TRUE}
+weights <- c(1, .7)
+weights <- weights / sum(weights)
+centers <- c(-1, 1)
+sds <- c(0.5, 0.7)
+x <- seq(-3, 4, by = 0.05)
+pdf <- x |> lapply(\(x) sum(weights * dnorm(x, centers, sds))) |> unlist()
+{
+  plot(x, pdf, type ='l', col = "red", lwd = 1.5,
+       main = "Example of normal mixture (bimodal)",
+       ylim = c(0, max(c(weights, pdf))))
+  for(i in seq_along(weights)) {
+    points(x, weights[i] * dnorm(x, centers[i], sds[i]), type = 'l' )
+    points(c(centers[i], centers[i]), c(0, weights[i]), type = 'l', col = 'blue')
+  }
+}
+```
+
+We want to estimate these.
+
+See for example [Turek, Wehrhahn and Gimenez (2021). Bayesian non-parametric detection heterogeneity in ecological models.](https://link.springer.com/article/10.1007/s10651-021-00489-1)
+
+Simulate from a mixture of normals
+=====
+
+Let's use the second example above. We'll first simulate group identities and then normal draws given group identities.
+
+```{r, eval=recalculate}
+set.seed(1)
+n <- 500
+weights <- c(1, .7) # same as above...
+weights <- weights / sum(weights)
+centers <- c(-1, 1)
+sds <- c(0.5, 0.7) #... to here
+ID <- sample(1:2, prob = weights, size = n, replace = TRUE)
+head(ID)
+y <- rnorm(n, centers[ID], sds[ID])
+hist(y)
+```
+
+Bayesian estimation of non-parametric distributions
+=====
+
+Methods are often related to a "Dirichlet process" (DP) (not the same as a Dirichlet distribution).
+
+### Chinese restaurant process
+
+The DP has at its core a model for clustering, which is usually called a Chinese restaurant process (CRP).
+
+(There is also a "stick-breaking" representation that we won't show.)
+
+Here's the idea - we represent the probability of a new customer sitting at each table as follows:
+
+<center><img src="img/crp.png"></center>
+
+Under the CRP, the probability that the i'th customer sits at an unoccupied table is:
+
+$$ \frac{\alpha}{i-1+\alpha} $$
+
+and the probability the customer sits at table $k$ (where there are $n_k$ people already at the table) is:
+
+$$ \frac{n_k}{i-1+\alpha} $$
+
+- Each table represents a normal distribution in the mixture.
+- The number of customers is related to the weight for that mixture component. (The weight is not written explicitly.)
+- There is a mean and standard deviation for each mixture component.
+
+Fitting a CRP model
+=====
+
+We will simply estimate a model for the simulated data `x` above. Typically the BNP (CRP) model component would be used in a larger model, for example as a distribution for random effects to relax the typical assumption of normally distributed random effects.
+
+This model code comes from the nimble User Manual (section 10.2).
+
+```{r, eval=recalculate}
+code <- nimbleCode({
+  z[1:N] ~ dCRP(alpha, size = N)
+  alpha ~ dgamma(1, 1)
+  for(i in 1:M) {
+    thetatilde[i] ~ dnorm(0, var = 100)
+    s2tilde[i] ~ dinvgamma(1, 1)
+  }
+  for(i in 1:N) 
+    y[i] ~ dnorm(thetatilde[z[i]], var = s2tilde[z[i]])  
+})
+
+constants <- list(N = 500, M = 10)
+data <- list(y = y)
+inits <- list(thetatilde = rnorm(constants$M, 0, 10), 
+              s2tilde = rinvgamma(constants$M, 1, 1), 
+              z = sample(1:4, size = constants$N, replace = TRUE),
+              alpha  = 1)
+model <- nimbleModel(code, constants, data, inits)
+```
+
+# Fitting a CRP model (cont)
+
+We must be sure to monitor (record) `z`.
+
+```{r, eval=recalculate}
+mcmcConf <- configureMCMC(model)
+mcmcConf$addMonitors('z') # We must be sure to monitor (record) z
+mcmc <- buildMCMC(mcmcConf)
+comp <- compileNimble(model, mcmc)
+samples <- runMCMC(comp$mcmc, nchains = 1, niter = 10000)
+hist(samples[,'alpha'])
+hist(samples[,'z[1]'])
+```
+
+It can be difficult to see the BNP distribution itself. There is a tool for that: (It will use `compileNimble` and take a minute.)
+
+```{r, eval = recalculate}
+DPsamples <- getSamplesDPmeasure(comp$mcmc)
+```
+
+`DPsamples` is a *list* matrices, one for each row of the MCMC samples. Let's look at a few.
+
+```{r, eval=recalculate}
+DPsamples[[500]]
+DPsamples[[600]]
+DPsamples[[700]]
+```
+
+We can see the results look reasonable and will stop there.
+
+Bayesian variable selection
+=====
+
+- You have many candidate explanatory variables.
+- Bayesian approach is to have a probability that a variable is included in the model.
+- Really this is a probability that the coefficient is $\ne 0$.
+- Common implementation is with indicator variables.
+- This has problems.  Let's look at it.
+
+Set up a model
+=====
+Use linear regression for simplicity.
+
+- 5 "real" effects (true coefficient $\ne 0$)
+- 10 null effects  (true coefficient $= 0$).
+
+### Create `nimble` model
+```{r}
+library(nimble)
+lmCode <- nimbleCode({
+  psi ~ dunif(0,1)   # prior on inclusion probability
+  sigma ~ dunif(0, 20)
+  for(i in 1:numVars) {
+    z[i] ~ dbern(psi) # indicator variable
+    beta[i] ~ dnorm(0, sd = 100)
+    zbeta[i] <- z[i] * beta[i]  # indicator * beta
+  }
+  for(i in 1:n) {
+    pred.y[i] <- inprod(X[i, 1:numVars], zbeta[1:numVars])
+    y[i] ~ dnorm(pred.y[i], sd = sigma)
+  }
+})
+set.seed(1)
+X <- matrix(rnorm(100*15), nrow = 100, ncol = 15)
+lmConstants <- list(numVars = 15, n = 100, X = X)
+lmModel <- nimbleModel(lmCode, constants = lmConstants)
+```
+
+### Simulate data using `nimble` model.
+```{r}
+true_betas <- c(c(0.1, 0.2, 0.3, 0.4, 0.5),
+                rep(0, 10))
+lmModel$beta <- true_betas
+lmModel$sigma <- 1
+lmModel$z <- rep(1, 15)
+lmModel$psi <- 0.5
+lmModel$calculate()
+set.seed(0) ## Make this reproducible
+lmModel$simulate('y')
+lmModel$y
+lmModel$calculate() 
+lmModel$setData('y')
+lmData = list(y = lmModel$y)
+```
+
+Look at `lm`
+=====
+It will be helpful to refer to back simple linear regression:
+```{r}
+summary(lm(lmModel$y ~ lmModel$X))
+```
+
+Look at nimble results with default samplers.
+=====
+```{r}
+MCMCconf <- configureMCMC(lmModel)
+MCMCconf$addMonitors('z')
+MCMC <- buildMCMC(MCMCconf)
+ClmModel <- compileNimble(lmModel)
+CMCMC <- compileNimble(MCMC, project = lmModel, resetFunctions = TRUE)
+set.seed(100)
+system.time(samples_nimble <- runMCMC(CMCMC, niter = 100000, nburnin = 10000))
+```
+
+
+Look at default nimble results
+=====
+
+### Look at beta[1]
+```{r}
+inds <- seq(50000, 60000, by=10) ## Look at arbitrary 1001 iterations thinned
+plot(samples_nimble[inds,'beta[1]'])
+plot(samples_nimble[inds,'z[1]'])
+```
+
+### Look at beta[4]
+```{r}
+plot(samples_nimble[inds,'beta[4]'], ylim = c(-1, 1))
+plot(samples_nimble[inds,'z[4]'])
+```
+
+### Look at beta[5]
+```{r}
+plot(samples_nimble[inds,'beta[5]'])
+plot(samples_nimble[inds,'z[5]'])
+```
+
+### Look at posterior inclusion probabilities from each `beta[i]`
+```{r}
+zCols <- grep("z\\[", colnames(samples_nimble))
+posterior_inclusion_prob_nimble <- colMeans(samples_nimble[,zCols])
+plot(true_betas, posterior_inclusion_prob_nimble)
+```
+
+### Look at posterior inclusion probability, `psi`
+```{r}
+plot(density(samples_nimble[,'psi']))
+```
+
+Summary of results from default nimble
+=====
+
+- `beta[3]`, `beta[4]` and `beta[5]` are often included.
+- When `z[i] = 0`, the corresponding `beta[i]` will start following its **prior**.  It may wander far away from reasonable values, with either fast or slow mixing (depending on the situation).
+- Different samplers (e.g. slice samplers for `beta[i]`s) could do better but not solve the fundamental problem.
+
+Summary of Mixing problems (the main issue)
+=====
+
+- The model doesn't understand the role of `z[i]`.
+- When `z[i] = 0`, the corresponding `beta[i]` will start following its **prior**.
+- A proposal to set `z[i] = 1` can only be accepted if `beta[i]` has a reasonable value.
+- This creates poor mixing over `z[i]`s.
+
+     - With a slice sampler (e.g. JAGS default) `beta[i]` mixes better over its prior, and `z[i]` doesn't get set to 0 unless `beta[i]` happens to hit a small range of values to be included in the model.
+     - With a random-walk MH sampler (default nimble), adaptation depends on `z[i]` (is it adapting to prior or posterior?), and this affects mixing when `z[i]` is 0.  Behavior seems to be problematic in this example.
+          
+- Conventional solution in BUGS/JAGS language: Use informative prior for `beta[i]` to avoid these problems.  This amounts to changing the model because the MCMC implementation has a problem, and that is never ideal.
+
+### Wasteful computation (a secondary issue)
+- When `z[i] = 0`, we'd like to not be wasting computation on `beta[i]`.
+
+Solution: Reversible Jump MCMC
+=====
+
+- RJMCMC is a method for sampling across different models.
+- Specifically it is about sampling between different numbers of dimensions.
+- We don't change the actual nimble model object, but we turn on and off which dimensions are sampled.
+- Implementation, like all samplers, is written using `nimbleFunction`s.
+
+RJMCMC for variable selection in nimble
+=====
+
+- Update an MCMC configuration to use RJMCMC.
+
+```{r}
+# make a new copy of the model to be totally independent
+lmModel2 <- lmModel$newModel(replicate = TRUE)
+MCMCconfRJ <- configureMCMC(lmModel2)
+MCMCconfRJ$addMonitors('z')
+configureRJ(MCMCconfRJ,
+            targetNodes = 'beta',
+            indicatorNodes = 'z',
+            control = list(mean = 0, scale = .2))
+MCMCRJ <- buildMCMC(MCMCconfRJ)
+```
+
+Run the RJMCMC
+=====
+```{r}
+ClmModel2 <- compileNimble(lmModel2)
+CMCMCRJ <- compileNimble(MCMCRJ, project = lmModel2)
+set.seed(100)
+system.time(samples_nimble_RJ <- runMCMC(CMCMCRJ, niter = 100000, nburnin = 10000))
+```
+
+Look at RJMCMC results
+=====
+
+### Look at beta[1] 
+```{r}
+inds <- seq(50000, 60000, by = 10)
+plot(samples_nimble_RJ[inds,'beta[1]'])
+plot(samples_nimble_RJ[inds,'z[1]'])
+```
+
+### Look at beta[4]
+```{r}
+plot(samples_nimble_RJ[inds,'beta[4]'])
+plot(samples_nimble_RJ[inds,'z[4]'])
+```
+
+### Look at beta[5]
+```{r}
+plot(samples_nimble_RJ[inds,'beta[5]'])
+plot(samples_nimble_RJ[inds,'z[5]'])
+```
+
+### Look at posterior inclusion probabilities of each `beta[i]`
+```{r}
+zCols <- grep("z\\[", colnames(samples_nimble_RJ))
+posterior_inclusion_prob_nimble_RJ <- colMeans(samples_nimble_RJ[,zCols])
+plot(true_betas, posterior_inclusion_prob_nimble_RJ)
+```
+
+### Look at posterior inclusion probability, `psi`
+```{r}
+plot(density(samples_nimble_RJ[,'psi']))
+```
+
+Summary of RJMCMC
+=====
+- Mixing was much better.
+- Adaptation for coefficient samplers only occurs when the coefficient is "in the model".
+- Run time was much faster than default nimble, which was faster than JAGS.  Magnitudes will depend on specific problems (how often `z[i]` are 0.)
+- Tuning parameter of RJ proposal scale (sd) must be chosen.
+
+Spatial capture-recapture
+=====
+These models get big and inefficient for several reasons:
+
+- All individuals might be detected anywhere (in theory).
+- Imputed individuals (data augmentation) are computationally costly even when "not in the model".
+- Data structures can be very large and mostly 0s (individuals-x-detectors).
+- Sampling can be inefficient.
+
+[`nimbleSCR`](https://CRAN.R-project.org/package=nimbleSCR) provides tools to alleviate these problems. See its vignettes.
+
+Longer-term: better nimble workflows
+=====
+Some things about `nimble` that are not so wonderful:
+
+- You need to rebuild and recompile things in every R session.
+- Objects can't easily be saved and re-loaded.
+- It is too hard to write packages using `nimble` internally.
+- `nimble` can use a lot of memory.
+
+We are working on improving these with deep rewriting of much of nimble's core code. This will take time.

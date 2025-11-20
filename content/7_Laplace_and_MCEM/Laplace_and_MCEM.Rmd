@@ -1,0 +1,383 @@
+---
+title: "Maximum likelihood: Laplace approximation and Monte Carlo expectation maximization"
+subtitle: "NIMBLE workshop, CEFE/CNRS, Montpellier, France"
+author: "NIMBLE Development Team"
+date: "November 2025"
+output:
+  slidy_presentation: default
+  beamer_presentation: default
+header-includes:
+  - \newcommand{\by}{\mathbf{y}}
+  - \newcommand{\btheta}{\boldsymbol{\theta}}
+  - \newcommand{\bmu}{\boldsymbol{\mu}}
+  - \newcommand{\bhatmu}{\boldsymbol{\hat{\mu}}}
+  - \newcommand{\bhattheta}{\boldsymbol{\hat{\theta}}}
+  - \DeclareMathOperator*{\argmax}{arg\,max}
+---
+
+<style>
+slides > slide {
+  overflow-x: auto !important;
+  overflow-y: auto !important;
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = FALSE) # cache=TRUE can cause problems
+library(nimble)
+has_ggplot2 <- require(ggplot2)
+```
+
+Laplace approximation
+=====
+- Laplace approximation (LA) is a fast method (often accurate) for approximating definite integrals
+- In statistics, LA is often used to approximate marginal likelihoods, by integrating over continuous random effects.
+    - (LA more generally is used to approximate any marginal posterior distributions, by integrating over some continuous dimensions.)
+- We see Laplace approximation used in software such as 
+    - INLA
+    - TMB
+    - glmmTMB
+    - lme4
+    - others
+
+NIMBLE's Laplace approximation will soon move to a new package, `nimbleQuad` (quadrature).
+
+Laplace approximation
+=====
+Here is the math for the LA marginal likelihood:
+$$
+\tag{1}
+p(\by|\btheta) = \int p(\by, \bmu | \btheta) d\bmu=\int p(\bmu | \btheta) \times p(\by | \bmu,\btheta) d\bmu \\ 
+\approx p^{LA}(\by|\btheta)=
+\frac{(2\pi)^{n/2}}{\sqrt{det[H(\btheta)]}} p(\by, \bhatmu | \btheta),
+$$
+
+where
+
+- $\btheta$: a vector of model parameters (or top-level nodes in a model)
+- $\bmu$: a vector of random effects (or mid-level nodes )
+- $\by$: a vector of data (or bottom-level nodes)
+- $\bhatmu = \bhatmu(\btheta)=\argmax_{\mu}p(\by,\bmu | \btheta)$, the MLE of $\bmu$ for fixed $\btheta$.
+- $H(\btheta) = -\log p_{\bmu\bmu}''(\by,\bhatmu | \btheta)$, the Hessian (matrix of second derivatives) with respect to $\bmu$ at $\bhatmu$
+- $\frac{\sqrt{det[H(\btheta)]}}{(2\pi)^{n/2}}$ is the Gaussian approximation to $p(\bmu | \by, \btheta)$ at $\bhatmu$.
+\ 
+
+Laplace approximation
+=====
+#### LA for conditionally independent random effects
+In many models, each random effect is used for distinct subsets of data. In this case we can use multiple, independent Laplace approximations.
+
+In general, formula (1) can be written as 
+$$
+p(\by|\btheta) = \int p(\by, \bmu | \btheta) d\bmu = \int p(\by_1, \bmu_1 | \btheta) d\bmu_1 \times \cdots \times \int p(\by_K, \bmu_K | \btheta) d\bmu_K \times p(\by^* | \btheta),
+$$
+where
+
+- $(\by_k, \bmu_k), k=1, \ldots, K$ are $K$ *conditionally independent sets*
+- $p(\by^* | \btheta)$ specifies the likelihood component that does not depend on any random effects
+- $(\by_1, \ldots, \by_K, \by^*) = \by, (\bmu_1, \ldots, \bmu_K) = \bmu$
+- (If there are no random effects, then nimble's Laplace will simply use the exact likelihood.)
+
+\
+
+What is needed for Laplace and Laplace MLE?
+=====
+- "Inner" optimization to find $\bhatmu(\btheta)$: Much faster with derivatives (AD)
+- Logdet (log of the determinant) of the Hessian $H(\btheta)$ (2nd derivatives)
+- "Outer" optimization to maximize $p^{LA}(\by|\btheta)$ to find MLE $\bhattheta$
+- The gradient of $p^{LA}(\by|\btheta)$ wrt $\btheta$:
+    - Gradient of function of 2nd derivatives of $p(\by, \bmu | \btheta)$ requires 3rd derivatives.
+    - Gradient of a function of an $\argmax$ result requires implicit derivatives.
+    - The necessary pieces are given by <a href="https://www.sciencedirect.com/science/article/abs/pii/S0167947306000764" target="_blank" style="color: blue">Skaug and Fournier (2006) </a> or <a href="https://www.jstatsoft.org/article/view/v070i05" target="_blank" style="color: blue">Kristensen et al. (2016) </a> 
+- Numerical methods are used for inner and outer optimizations
+- AD is used for obtaining derivatives for Laplace, so turn on AD for your model (`buildDerivs=TRUE`). 
+\
+
+Laplace workflow
+=====
+<center>
+![](img/Laplace_workflow.png) 
+</center>
+
+\
+
+
+Example: A generalized linear mixed model (GLMM)
+=====
+* There are plenty of specialized GLMM packages.
+* Easy to understand and we can compare to a correct answer.
+* This example is from [Zuur et al. (2009, Mixed Effects Models and Extensions in Ecology with R)](https://www.highstat.com/index.php/mixed-effects-models-and-extensions-in-ecology-with-r) (chapter 13).
+* Elaphostrongylus cervi (E. cervi) is a nematode parasite of deer.  On each of 24 farms in Spain, multiple deer were sampled for E. cervi.
+* Original data from "Vicente et al. (2005)", citing [this](https://doi.org/10.1051/vetres:2005044), although I'm not sure they cited the right paper!
+* 826 total deer.
+* `Sex` (M/F) and (centered) body `Length` are explanatory variables (fixed effects).
+* `Farm` is a random effect.
+* Response variable is presence (1) or absence (0) of the parasite E. cervi.
+
+GLMM example: Load the data
+=====
+```{r}
+DeerEcervi <- read.table(file.path('..', 'examples', 'DeerEcervi', 'DeerEcervi.txt'), header = TRUE)
+summary(DeerEcervi)
+
+## Create presence/absence data from counts.
+DeerEcervi$Ecervi_01 <- DeerEcervi$Ecervi
+DeerEcervi$Ecervi_01[DeerEcervi$Ecervi>0] <- 1
+## Set up naming convention for centered and uncentered lengths for exercises later
+DeerEcervi$unctrLength <- DeerEcervi$Length
+## Center Length for better interpretation
+DeerEcervi$ctrLength <- DeerEcervi$Length - mean(DeerEcervi$Length)
+## Make a factor version of Sex for plotting
+DeerEcervi$fSex <- factor(DeerEcervi$Sex)
+## Make a factor and id version of Farm
+DeerEcervi$fFarm <- factor(DeerEcervi$Farm)
+DeerEcervi$farm_ids <- as.numeric(DeerEcervi$fFarm)
+```
+
+# GLMM example: Look at data
+
+```{r eval=has_ggplot2}
+ggplot(data = DeerEcervi, 
+        mapping = aes(x = ctrLength, y = Ecervi_01, color = fSex)) + 
+  geom_point() + 
+  geom_jitter(width = 0, height = 0.1) + 
+  facet_wrap(~Farm)
+```
+
+`fSex` is 1 for males, 2 for females.
+
+GLMM example: `nimble` model code
+=====
+```{r}
+DEcode <- nimbleCode({
+  for(i in 1:2) {
+    # Priors for intercepts and length coefficients for sex = 1 (male), 2 (female)
+    sex_int[i] ~ dnorm(0, sd = 1000)
+    length_coef[i] ~ dnorm(0, sd = 1000)
+  }
+
+  # Priors for farm random effects and their standard deviation.
+  farm_sd ~ dunif(0, 20)
+  for(i in 1:num_farms) {
+    farm_effect[i] ~ dnorm(0, sd = farm_sd)
+  }
+
+  # logit link and Bernoulli data probabilities
+  for(i in 1:num_animals) {
+    logit(disease_probability[i]) <-
+      sex_int[ sex[i] ] +
+      length_coef[ sex[i] ]*length[i] +
+      farm_effect[ farm_ids[i] ]
+    Ecervi_01[i] ~ dbern(disease_probability[i])
+  }
+})
+```
+
+GLMM example: Build the model
+=====
+```{r}
+DEconstants <- list(num_farms = 24,
+                    num_animals = 826,
+                    length = DeerEcervi$ctrLength,
+                    sex = DeerEcervi$Sex,
+                    farm_ids = DeerEcervi$farm_ids)
+
+DEmodel <- nimbleModel(DEcode,
+                       constants = DEconstants,
+                       buildDerivs=TRUE)
+# We can set data AFTER buliding the model (but before build algorithms)
+DEmodel$setData(list(Ecervi_01 = DeerEcervi$Ecervi_01))
+```
+
+GLMM example: Build the Laplace approximation
+=====
+```{r}
+DElaplace <- buildLaplace(DEmodel)
+```
+
+How can we understand the details? `buildLaplace` needs to know:
+
+- `paramNodes`: parameters ($\btheta$)
+- `randomEffectsNodes`: random effects ($\bmu$)
+- `calcNodes`: What to calculate for $p(\by, \bmu | \btheta)$.
+- `calcNodesOther`: What to calculate for $p(\by^* | \btheta)$ (anything not related to $\bmu$).
+
+You can provide any subset of these (including none), and `buildLaplace` will try to make a good guess by calling `setupMargNodes`.
+
+GLMM example: Nodes
+=====
+Look at the default node handling:
+```{r}
+# knitr needs the model redefined here.
+DEmodel <- nimbleModel(DEcode,
+                       constants = DEconstants,
+                       buildDerivs=TRUE)
+DEmodel$setData(list(Ecervi_01 = DeerEcervi$Ecervi_01))
+
+LAnodes <- setupMargNodes(DEmodel)
+LAnodes$paramNodes # topological "top" nodes
+LAnodes$randomEffectsNodes # topological "latent" nodes
+LAnodes$calcNodes[c(1:3, 25:27, 851:853)] # most of the model
+LAnodes$randomEffectsSets # conditionally independent random effects
+```
+
+GLMM example: Nodes
+=====
+You can control how nodes are handled.
+
+The default handling assumes some things about how the model is written, and it can't always get it right.
+
+If random effects are written as top-level nodes, `setupMargNodes` will not do what you want.
+
+Example:
+
+- Random effects may be written as `farm_effect[i] ~ dnorm(0,1)`, then multiplied by a standard deviation and/or shifted by a mean.
+- In that case, `farm_effect[i]` is a "top" node and would be assumed to be a parameter instead of a random effect.
+- You would need to give `randomEffectsNodes='farm_effect'` as input to `buildLaplace`.
+
+GLMM example: More notes
+=====
+### More notes about NIMBLE Laplace
+
+- The input node categories are for stochastic nodes. Deterministic node calculations will be added when necessary.
+
+- If you want `buildLaplace` to use one global approximation instead of multiple conditionally independent approximations, set `control = list(split = FALSE)`.
+
+- For easier (better?) optimization (both inner and outer), `buildLaplace` uses nimble's parameter transformation system. This establishes transformations to and from constrained parameter spaces (how the model might be written, e.g. $\sigma > 0$) to unconstrained spaces (for algorithms to work in); see `help("parameterTransform")`. 
+
+- You can control choice of both inner and outer optimization methods. These can be provided by (e.g.) `control = list(innerOptimMethod = "nlminb")`. Options are methods from `optim`, or `nlminb`, or any method you provide via a protocol.
+
+- Priors on parameters are used (only) to determine valid parameter ranges to create the parameter transformation to unconstrained coordinates.
+
+- It is possible to run MCMC on outer parameters with Laplace-approximated likelihoods. The setup is a bit involved and may get easier in future versions.
+
+GLMM example: Run
+=====
+Finally let's run the example:
+```{r}
+DEmodel <- nimbleModel(DEcode,
+                       constants = DEconstants,
+                       buildDerivs=TRUE)
+DEmodel$setData(list(Ecervi_01 = DeerEcervi$Ecervi_01))
+DElaplace <- buildLaplace(DEmodel)
+comp <- compileNimble(DEmodel, DElaplace) # Slow due to AD
+DEmle <- comp$DElaplace$findMLE()
+```
+
+GLMM example: Results
+=====
+```{r}
+DEmle
+```
+These are "raw" results from optimization.
+
+We can get more information with `summary`
+```{r}
+DEsummary <- comp$DElaplace$summary(DEmle)
+DEsummary
+```
+
+Compare to `glmmTMB`
+```{r}
+library(glmmTMB)
+TMBfit <- glmmTMB(Ecervi_01 ~ ctrLength*fSex + (1|fFarm), data = DeerEcervi, family="binomial")
+summary(TMBfit)
+TMBcoefs <- fixef(TMBfit)$cond
+## Arrange parameters from TMB into nimble's order to we can compare easily
+NIMcoefs <- c(TMBcoefs[1], TMBcoefs[1]+TMBcoefs[3], TMBcoefs[2], TMBcoefs[2] + TMBcoefs[4],
+              sqrt(summary(TMBfit)$varcor$cond$fFarm[1,1]))
+NIMcoefs
+```
+
+Adaptive Gauss-Hermite Quadrature (AGHQ)
+====
+
+Adaptive Gauss-Hermite Quadrature (AGHQ) is a generalization of Laplace that includes additional integration nodes. When Laplace is not very accurate, increasing the number of integration points can improve estimation. 
+
+However, Laplace is often very accurate. Laplace is 1st (or 0th) order AGHQ.
+
+Gradients of the AGHQ approximation are non-trivial and are not (yet) provided, so it is not very efficient to obtain MLEs with AGHQ.
+
+Currenty we recommend using AGHQ to check the accuracy of Laplace approximation at the MLE.
+
+AGHQ is available as `buildAGHQ`, or as part of `Laplace`. Really they are the same thing and we just provide the name "Laplace" to be friendly.
+
+Only odd numbers of quadrature nodes make sense (otherwise there would be no node at $\argmax_{\mu}p(\by,\bmu | \btheta)$, which would be silly).
+
+Adaptive Gauss-Hermite Quadrature (AGHQ)
+====
+Check to see if Laplace is accurate for the Deer E. cervi model.
+
+```{r, eval = TRUE}
+comp$DElaplace$calcLogLik(DEmle$par)     # Laplace approximation
+
+comp$DElaplace$updateSettings(nQuad = 3) # Increase from 1 to 3 quadrature nodes
+comp$DElaplace$calcLogLik(DEmle$par)     # Small change
+
+comp$DElaplace$updateSettings(nQuad = 5) # 5 nodes
+comp$DElaplace$calcLogLik(DEmle$par)     # Smaller change
+
+comp$DElaplace$updateSettings(nQuad = 11) # 11 nodes
+comp$DElaplace$calcLogLik(DEmle$par)     # Very small change
+
+comp$DElaplace$updateSettings(nQuad = 15) # 5 nodes
+comp$DElaplace$calcLogLik(DEmle$par)     # Tiny change
+```
+
+Monte Carlo Expectation Maximization
+=====
+
+MCEM is a workhorse for maximum likelihood with latent states / random effects or "missing data".
+
+It can be very slow, but it is very general. It can also need care in initialization and tuning parameters.
+
+It works by iterating two steps:
+
+- Use MCMC to sample from [latent states | parameters, data].
+- Maximization over a function of the MCMC sample to update parameters.
+
+The convergence path of the parameters can be slow.
+
+NIMBLE uses the "ascent-based" MCEM of [Caffo et al. 2005](https://doi.org/10.1111/j.1467-9868.2005.00499.x). This increases MCMC sample size as the algorithm converges. In theory it is a great idea. In practice the final iterations can be very slow. You can control this in various ways or turn it off entirely.
+
+Monte Carlo Expectation Maximization
+=====
+It turns out we'll want a robust version that never lets the `disease_probability` values underflow or overflow to exactly 0 or 1.
+We also want wider boundaries on `farm_sd` for numerical reasons.
+I'll run this for 30 iterations and it should get reasonably close to the MLE above. It would need longer to fully converge.
+```{r}
+DEcode2 <- nimbleCode({
+  for(i in 1:2) {
+    # Priors for intercepts and length coefficients for sex = 1 (male), 2 (female)
+    sex_int[i] ~ dnorm(0, sd = 1000)
+    length_coef[i] ~ dnorm(0, sd = 1000)
+  }
+
+  # Priors for farm random effects and their standard deviation.
+  farm_sd ~ dunif(0, 1000) #gives a problem for MCEM
+  for(i in 1:num_farms) {
+    farm_effect[i] ~ dnorm(0, sd = farm_sd)
+  }
+
+  # logit link and Bernoulli data probabilities
+  for(i in 1:num_animals) {
+    disease_probability[i] <- 1e-6 + (0.99999*expit(
+      sex_int[ sex[i] ] +
+      length_coef[ sex[i] ]*length[i] +
+      farm_effect[ farm_ids[i] ]))
+    Ecervi_01[i] ~ dbern(disease_probability[i])
+  }
+})
+if(!require(mcmcse))
+  stop("You'll need mcmcse to run MCEM.")
+DEmodel <- nimbleModel(DEcode2,
+                       constants = DEconstants,
+                       inits = list(farm_effect=rnorm(24,0,0.1),  # "friendly" inits (small sd)
+                                    farm_sd=0.1, sex_int=c(0,0), length_coef=c(0,0)),
+                       buildDerivs=TRUE)
+DEmodel$setData(list(Ecervi_01 = DeerEcervi$Ecervi_01))
+DEmcem <- buildMCEM(DEmodel) # The warning is not a problem
+comp <- compileNimble(DEmodel, DEmcem) # Slow due to AD
+#comp$DEmodel$farm_effect <- rnorm(24, 0, .1)
+DEmle <- comp$DEmcem$findMLE(c(0,0,0,0,0.1), initM=2000, maxIter = 30)
+```

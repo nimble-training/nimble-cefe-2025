@@ -22,11 +22,11 @@ Friday, November 21st
 1. (9:00 - 9:50) Introduction to NIMBLE: Basic concepts and workflows
 2. (10:00 - 10:50) Extending NIMBLE: Introduction to nimbleEcology
 3. (11:00 - 11:50) Extending NIMBLE: Writing new functions and distributions to use in models
-4. (12:00 - 13:30) Break for lunch
-5. (13:30 - 13:45) Brief overview of advanced features in NIMBLE: Bayesian nonparametric distributions; reversible jump sampling for variable selection; particle filtering; parameter transformations; automatic differentiation; advanced nimbleFunction programming concepts.
-6. (13:40 - 14:20) Customizing MCMC configurations and using Hamiltonian Monte Carlo (nimbleHMC)
-7. (14:30-15:20) Spatial models: conditional autoregressive (CAR) and Gaussian process models
-8. (15:30-16:20) Maximum likelihood: Laplace approximation and Monte Carlo expectation maximization (MCEM)
+- (12:00 - 13:30) Break for lunch
+4. (13:30 - 13:45) Brief overview of advanced features in NIMBLE: Bayesian nonparametric distributions; reversible jump sampling for variable selection; particle filtering; parameter transformations; automatic differentiation; advanced nimbleFunction programming concepts.
+5. (13:40 - 14:20) Customizing MCMC configurations and using Hamiltonian Monte Carlo (nimbleHMC)
+6. (14:30-15:20) Spatial models: conditional autoregressive (CAR) and Gaussian process models
+7. (15:30-16:20) Maximum likelihood: Laplace approximation and Monte Carlo expectation maximization (MCEM)
 
 
 ## Help with NIMBLE
